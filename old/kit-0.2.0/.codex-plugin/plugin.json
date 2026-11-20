@@ -1,0 +1,11 @@
+{
+  "name": "devkit",
+  "version": "0.2.0",
+  "description": "요청한 것만, 프로젝트의 방식대로 만들고 실제로 써 보며 확인하게 돕는 스킬 묶음: 문(start)과 여섯 단계(받기·찾기·만들기·확인·검토·마무리)",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "devkit",
+    "shortDescription": "요청대로, 프로젝트 방식대로 만들고 확인하기",
+    "category": "Developer Tools"
+  }
+}

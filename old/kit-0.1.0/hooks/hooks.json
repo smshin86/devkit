@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"When asked to build or change something - read the devkit:build-list skill before editing any code. If it touches an existing screen - also read devkit:screen-map. If there are two or more things to build - also read devkit:parallel-build.\""
+          }
+        ]
+      }
+    ]
+  }
+}

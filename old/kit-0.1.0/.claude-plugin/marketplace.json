@@ -1,0 +1,13 @@
+{
+  "name": "devkit",
+  "description": "devkit 스킬 묶음",
+  "owner": { "name": "devkit" },
+  "plugins": [
+    {
+      "name": "devkit",
+      "description": "기존 프로젝트에서 요청한 것만 맞게 만들도록 돕는 스킬 묶음: 화면 지도, 만들 것 목록, 동시에 만들기",
+      "version": "0.1.0",
+      "source": "./"
+    }
+  ]
+}

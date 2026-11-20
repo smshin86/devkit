@@ -1,0 +1,32 @@
+gw.1 mem buddy_o7+=76 win_commit_gb=7 11:20:58
+gw.1 rc=0 secs=231 tests=[122 passed, 5 skipped, 1034 warnings in 25.77s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=43 11:25:18
+gp.1 mem buddy_o7+=105 win_commit_gb=6 11:25:18
+gp.1 rc=0 secs=158 tests=[122 passed, 5 skipped, 1037 warnings in 24.89s] lint=[All checks passed!] fmt=[2 files would be reformatted, 27 files already formatted] long_accept_10m=43 11:28:24
+gw.2 mem buddy_o7+=109 win_commit_gb=6 11:28:25
+gw.2 rc=0 secs=80 tests=[123 passed, 5 skipped, 1042 warnings in 28.16s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=43 11:30:14
+gp.2 mem buddy_o7+=109 win_commit_gb=6 11:30:13
+gp.2 rc=0 secs=61 tests=[123 passed, 5 skipped, 1044 warnings in 26.95s] lint=[All checks passed!] fmt=[2 files would be reformatted, 27 files already formatted] long_accept_10m=44 11:31:41
+gw.3 mem buddy_o7+=109 win_commit_gb=6 11:31:42
+gw.3 rc=0 secs=71 tests=[124 passed, 5 skipped, 1056 warnings in 26.06s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=43 11:33:19
+gp.3 mem buddy_o7+=109 win_commit_gb=6 11:33:20
+gp.3 rc=0 secs=61 tests=[124 passed, 5 skipped, 1056 warnings in 27.81s] lint=[All checks passed!] fmt=[3 files would be reformatted, 26 files already formatted] long_accept_10m=43 11:34:50
+gw.5 mem buddy_o7+=109 win_commit_gb=6 11:34:50
+gw.5 rc=0 secs=88 tests=[125 passed, 5 skipped, 1071 warnings in 37.24s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=44 11:36:56
+gp.5 mem buddy_o7+=26 win_commit_gb=4 11:36:57
+gp.5 rc=0 secs=242 tests=[127 passed, 5 skipped, 1089 warnings in 24.29s] lint=[All checks passed!] fmt=[3 files would be reformatted, 26 files already formatted] long_accept_10m=44 11:41:24
+gw.6 mem buddy_o7+=29 win_commit_gb=5 11:41:25
+gw.6 rc=0 secs=74 tests=[126 passed, 5 skipped, 1081 warnings in 26.78s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=43 11:43:05
+gp.6 mem buddy_o7+=28 win_commit_gb=5 11:43:05
+gp.6 rc=0 secs=34 tests=[128 passed, 5 skipped, 1100 warnings in 25.19s] lint=[All checks passed!] fmt=[3 files would be reformatted, 26 files already formatted] long_accept_10m=44 11:44:05
+gw.7 mem buddy_o7+=29 win_commit_gb=5 11:44:05
+gw.7 rc=0 secs=69 tests=[127 passed, 5 skipped, 1096 warnings in 30.24s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=43 11:45:45
+gp.7 mem buddy_o7+=1293 win_commit_gb=17 12:29:03
+gp.7 rc=0 secs=49 tests=[129 passed, 5 skipped, 1112 warnings in 25.32s] lint=[All checks passed!] fmt=[3 files would be reformatted, 26 files already formatted] long_accept_10m=0 12:30:18
+gw.8 mem buddy_o7+=1237 win_commit_gb=17 12:30:18
+gw.8 rc=0 secs=73 tests=[128 passed, 5 skipped, 1104 warnings in 23.53s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=0 12:31:55
+gp.8 mem buddy_o7+=1232 win_commit_gb=17 12:31:56
+gp.8 rc=0 secs=38 tests=[131 passed, 5 skipped, 1123 warnings in 31.84s] lint=[Found 1 error.] fmt=[3 files would be reformatted, 26 files already formatted] long_accept_10m=0 12:33:07
+gw.4 mem buddy_o7+=1230 win_commit_gb=16 12:33:08
+gw.4 rc=0 secs=53 tests=[128 passed, 5 skipped, 1105 warnings in 27.91s] lint=[All checks passed!] fmt=[1 file would be reformatted, 28 files already formatted] long_accept_10m=0 12:34:30
+gp.4 mem buddy_o7+=1258 win_commit_gb=16 12:34:30
+gp.4 rc=0 secs=32 tests=[131 passed, 5 skipped, 1123 warnings in 28.02s] lint=[Found 1 error.] fmt=[3 files would be reformatted, 26 files already formatted] long_accept_10m=0 12:35:31
