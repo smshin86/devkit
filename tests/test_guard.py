@@ -324,7 +324,8 @@ def test_long_command_is_fast(cmd, kind):
 
 
 def test_names_match_first_guide():
-    line = FIRST_GUIDE.read_text(encoding="utf-8").splitlines()[19]
+    L = FIRST_GUIDE.read_text(encoding="utf-8").splitlines()
+    line = L[L.index("## 읽지 않는 것") + 1]   # 보는 차례가 늘어도 그 절의 첫 줄
     names = re.findall(r"`([^`]+)`", re.search(r"이름이 (.+?)인 파일", line).group(1))
     assert len(names) == 14 and names == G.NAMES
 

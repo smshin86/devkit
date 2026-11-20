@@ -23,7 +23,7 @@ NOTE = install.NOTE_BEGIN + "\n" + RULES_TEXT + install.NOTE_END + "\n"
 OLD_NOTE = install.NOTE_BEGIN + "\n" + LINE1 + "\n" + install.NOTE_END + "\n"
 DESC = "일할 때 지키는 한 장(닮은 것이 하던 대로, 부탁한 것만, 끝에 사실대로)과, 큰 일일 때만 읽는 시작 안내·살펴보기(길 안내 한 장)"
 KIT_FILES = {".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "hooks/hooks.json",
-             "scripts/session_start.py", "scripts/work.py", "scripts/guard.py", "skills/start/SKILL.md", "skills/find/SKILL.md", "skills/find/first-guide.md", "rules.md", "install.py", "README.md", "CREDITS.md"}
+             "scripts/session_start.py", "scripts/work.py", "scripts/guard.py", "skills/start/SKILL.md", "skills/find/SKILL.md", "skills/find/first-guide.md", "skills/find/screen-table.md", "rules.md", "install.py", "README.md", "CREDITS.md"}
 
 
 def make_env(tmp_path, tools=("claude", "codex"), rc=0):
@@ -279,7 +279,7 @@ def test_manifests():
     def m(p):
         return json.loads((KIT / p).read_text(encoding="utf-8"))
     mk, cp = m(".claude-plugin/marketplace.json"), m(".claude-plugin/plugin.json")
-    assert mk["plugins"][0]["version"] == cp["version"] == "0.6.0"
+    assert mk["plugins"][0]["version"] == cp["version"] == "0.7.0"
     assert mk["description"] == mk["plugins"][0]["description"] == cp["description"] == DESC
     assert mk["owner"] == {"name": "devkit"}
     assert set(cp) == {"name", "description", "version"}
