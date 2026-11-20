@@ -279,7 +279,7 @@ def test_manifests():
     def m(p):
         return json.loads((KIT / p).read_text(encoding="utf-8"))
     mk, cp = m(".claude-plugin/marketplace.json"), m(".claude-plugin/plugin.json")
-    assert mk["plugins"][0]["version"] == cp["version"] == "0.7.0"
+    assert mk["plugins"][0]["version"] == cp["version"] == "0.7.1"
     assert mk["description"] == mk["plugins"][0]["description"] == cp["description"] == DESC
     assert mk["owner"] == {"name": "devkit"}
     assert set(cp) == {"name", "description", "version"}
