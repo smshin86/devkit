@@ -2,6 +2,8 @@
 # intake.sh <이름> <new|old> <k> — 받기 재기 한 번. intake-prompts.txt의 k번째 줄(1~3)을 새 사본에서 첫 턴으로 보내고,
 # 같은 대화를 이어 intake-replies.txt의 k번째 줄을 둘째 턴으로 보낸다. 뒤에 시험·코드 모양 검사를 돈다.
 # 팔: new = 지금 꾸러미, old = 옛 꾸러미. 사본 $M/runs/<이름>-i<k>는 걸어 보기용으로 남기고 되돌리지 않는다. 돈 줄은 스스로 $O/intake.cost에 적는다. 세는 것은 intake.py와 big.py가 한다.
+# 환경 변수 다섯은 다 같이 주거나 다 같이 안 준다(하나만 있거나 꼴이 틀리면 끝 값 9): IK_KIT=꾸러미 절대 경로 · IK_ARM=팔 이름표(둘째 인자와 같게) · IK_COST=장부 이름 <이름>.cost(기본 intake.cost) · IK_NEED=한 번에 더 드는 돈(기본 2.50) · IK_STOP=합 상한(기본 8.00).
+# 변수를 안 주면 팔은 new/old, 장부는 intake.cost, 돈 선은 2.50/8.00 그대로다.
 W=/home/ssmge/zzz-devkit-exist
 M=/home/ssmge/zzz-devkit-measure; O=$M/out; LOG=$O/g.log
 R=/mnt/e/claude_dev/devkit/docs/measure/원본
@@ -12,8 +14,29 @@ BASE=2bc1b8b
 NAME=${1-}; ARM=${2-}; N=${3-}
 [ $# -eq 3 ] || { echo "인자 틀림: <이름> <new|old> <k> 셋이 있어야 함(받은 수 $#)"; exit 9; }
 case "$NAME" in ''|*[!A-Za-z0-9_-]*) echo "인자 틀림: 이름은 영문·숫자·_·- 만"; exit 9 ;; esac
+if [ -n "${IK_KIT+x}${IK_ARM+x}${IK_COST+x}${IK_NEED+x}${IK_STOP+x}" ]; then
+  [ "${IK_KIT+x}${IK_ARM+x}${IK_COST+x}${IK_NEED+x}${IK_STOP+x}" = xxxxx ] || { echo "인자 틀림: IK_KIT IK_ARM IK_COST IK_NEED IK_STOP은 다섯 다 주거나 다 안 줌"; exit 9; }
+  case "$IK_KIT" in /*) ;; *) echo "인자 틀림: IK_KIT는 절대 경로"; exit 9 ;; esac
+  case "$IK_KIT" in */../*|*/..) echo "인자 틀림: IK_KIT에 .. 없어야 함"; exit 9 ;; esac
+  [ -f "$IK_KIT/.claude-plugin/plugin.json" ] || { echo "인자 틀림: IK_KIT에 .claude-plugin/plugin.json 없음"; exit 9; }
+  [[ $IK_ARM =~ ^[a-z][a-z0-9]{0,7}$ ]] || { echo "인자 틀림: IK_ARM은 소문자로 시작하는 영소문자·숫자 8자 이내"; exit 9; }
+  case "$IK_ARM" in new|old) echo "인자 틀림: IK_ARM은 new·old가 아니어야 함"; exit 9 ;; esac
+  [ "$IK_ARM" = "$ARM" ] || { echo "인자 틀림: IK_ARM과 둘째 인자가 같아야 함"; exit 9; }
+  K=$IK_KIT
+else
 case "$ARM" in new) K=/mnt/e/claude_dev/devkit/kit ;; old) K=/mnt/e/claude_dev/devkit/old/kit-0.3.0 ;; *) echo "인자 틀림: 둘째는 new 또는 old"; exit 9 ;; esac
+fi
 case "$N" in 1|2|3) ;; *) echo "인자 틀림: k는 1~3"; exit 9 ;; esac
+LEDGER_NAME=${IK_COST-intake.cost}
+NEED=${IK_NEED-2.50}
+STOP=${IK_STOP-8.00}
+[[ $LEDGER_NAME =~ ^[A-Za-z0-9_-]+\.cost$ ]] || { echo "인자 틀림: IK_COST는 <이름>.cost 꼴"; exit 9; }
+[[ $NEED =~ ^[0-9]{1,2}\.[0-9]{2}$ ]] || { echo "인자 틀림: IK_NEED는 n.nn 꼴"; exit 9; }
+[[ $STOP =~ ^[0-9]{1,2}\.[0-9]{2}$ ]] || { echo "인자 틀림: IK_STOP은 n.nn 꼴"; exit 9; }
+awk -v n="$NEED" 'BEGIN{exit !(n>0)}' || { echo "인자 틀림: IK_NEED는 0보다 커야 함"; exit 9; }
+awk -v n="$NEED" -v t="$STOP" 'BEGIN{exit !(t>n)}' || { echo "인자 틀림: IK_STOP은 IK_NEED보다 커야 함"; exit 9; }
+LEDGER=$O/$LEDGER_NAME
+unset IK_KIT IK_ARM IK_COST IK_NEED IK_STOP
 [ -e "$HOME/.devkit" ] && { echo "~/.devkit 이 이미 있음 — 멈춤"; exit 8; }
 [ -e "$HOME/.devkit-guard-off" ] && { echo "~/.devkit-guard-off 이 있음 — 훅이 꺼진 채라 재지 않음, 멈춤"; exit 8; }
 [ -f "$P" ] || { echo "부탁 파일 없음"; exit 9; }
@@ -27,9 +50,9 @@ D=$M/runs/$NAME-i$N
 [ -e "$OP.t1.jsonl" ] && { echo "이미 돌림: $NAME $N"; exit 9; }
 [ -e "$D" ] && { echo "사본이 이미 있음: $D — 확인 뒤 지우고 다시"; exit 9; }
 spent=0.00
-[ -f "$O/intake.cost" ] && spent=$(awk '{s+=$1} END{printf "%.2f", s+0}' "$O/intake.cost")
-if awk -v s="$spent" 'BEGIN{exit !(s+2.50>8.00)}'; then
-  echo "돈 멈춤: 합 $spent + 2.50 > 8.00"; exit 4
+[ -f "$LEDGER" ] && spent=$(awk '{s+=$1} END{printf "%.2f", s+0}' "$LEDGER")
+if awk -v s="$spent" -v n="$NEED" -v t="$STOP" 'BEGIN{exit !(s+n>t)}'; then
+  echo "돈 멈춤: 합 $spent + $NEED > $STOP"; exit 4
 fi
 mkdir -p "$M/runs" "$O" "$M/tmp"; export TMPDIR=$M/tmp
 if awk -v s="$spent" 'BEGIN{exit !(s>=6)}'; then
@@ -175,7 +198,7 @@ on_sig() {
       c=$(awk -v a="$c" -v b="$cost1" 'BEGIN{d=a-b; if (d<0) d=0; printf "%.2f", d}')
     fi
     [ "$c" = "?" ] && c=2.50
-    echo "$c intake.$NAME.$N.$TURN" >> "$O/intake.cost"
+    echo "$c intake.$NAME.$N.$TURN" >> "$LEDGER"
     rm -f "$OP.pid"
     echo "intake.$NAME.$N 신호로 끊김 turn=$TURN cost=$c $(date +%H:%M:%S)" >> "$LOG"
   fi
@@ -215,7 +238,7 @@ rm -f "$OP.pid"
 trap '' TERM INT HUP
 cost1=$(costof "$OP.t1.jsonl")
 if [ "$cost1" = "?" ]; then cost1=2.50; fi
-echo "$cost1 intake.$NAME.$N.t1" >> "$O/intake.cost"
+echo "$cost1 intake.$NAME.$N.t1" >> "$LEDGER"
 CP=
 trap on_sig TERM INT HUP
 after t1
@@ -249,8 +272,8 @@ fi
 if [ "$T2" = sent ] && [ "$rc1" != 0 ]; then T2=skip:rc; fi
 if [ "$T2" = sent ] && { [ "$LEFT" != 0 ] || [ "$HOMEDK" != 0 ]; }; then T2=skip:left; fi
 if [ "$T2" = sent ]; then
-  spent=$(awk '{s+=$1} END{printf "%.2f", s+0}' "$O/intake.cost")
-  if awk -v s="$spent" 'BEGIN{exit !(s+2.50>8.00)}'; then T2=skip:money; fi
+  spent=$(awk '{s+=$1} END{printf "%.2f", s+0}' "$LEDGER")
+  if awk -v s="$spent" -v n="$NEED" -v t="$STOP" 'BEGIN{exit !(s+n>t)}'; then T2=skip:money; fi
 fi
 if [ "$T2" = sent ]; then memok t2 || T2=skip:mem; fi
 
@@ -274,7 +297,7 @@ if [ "$T2" = sent ]; then
     cost2=$(awk -v a="$cost2" -v b="$cost1" 'BEGIN{d=a-b; if (d<0) d=0; printf "%.2f", d}')
   fi
   if [ "$cost2" = "?" ]; then cost2=2.50; fi
-  echo "$cost2 intake.$NAME.$N.t2" >> "$O/intake.cost"
+  echo "$cost2 intake.$NAME.$N.t2" >> "$LEDGER"
   CP=
   trap on_sig TERM INT HUP
   after t2

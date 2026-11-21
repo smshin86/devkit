@@ -50,8 +50,8 @@ def fields(line):
     return dict(w.split("=", 1) for w in line.split()[1:] if "=" in w)
 
 
-def sh(script, *args, home="/nonexistent-devkit-test", env=None):
-    p = subprocess.run(["bash", str(M / script), *args], capture_output=True, text=True,
+def sh(script, *args, home="/nonexistent-devkit-test", env=None, cwd=None):
+    p = subprocess.run(["bash", str(M / script), *args], capture_output=True, text=True, cwd=cwd,
                        env={"PATH": "/usr/bin:/bin", "HOME": str(home), **(env or {})})
     return p.returncode, p.stdout + p.stderr
 
@@ -261,18 +261,114 @@ def test_intake_sh_checks_before_mkdir():
     L = text("intake.sh").splitlines()
 
     def first(needle):
-        return next(i for i, x in enumerate(L) if needle in x)
+        return next(i for i, x in enumerate(L) if needle in x and not x.lstrip().startswith("#"))
     mk = first("mkdir -p")
     for needle in ('[ -e "$HOME/.devkit" ]', '[ -e "$HOME/.devkit-guard-off" ]', "부탁 파일 없음", "답 파일 없음",
-                   "이미 돌림", "사본이 이미 있음", "돈 멈춤"):
+                   "이미 돌림", "사본이 이미 있음", "돈 멈춤", "IK_KIT", "IK_COST", "IK_NEED"):
         assert first(needle) < mk, needle
 
 
 def test_intake_sh_money_rule():
     t = text("intake.sh")
-    for need in ('[ -f "$O/intake.cost" ]', "s+2.50>8.00", "exit 4", "돈 알림", "s>=6"):
+    for need in ('[ -f "$LEDGER" ]', "BEGIN{exit !(s+n>t)}", "NEED=${IK_NEED-2.50}", "STOP=${IK_STOP-8.00}", "exit 4",
+                 "돈 알림", "s>=6"):
         assert need in t, need
     assert "-ge 6" not in t
+
+
+# --- intake.sh: 환경 변수 다섯(꾸러미·이름표·장부·돈 선 둘). 다 같이 주거나 다 같이 안 준다 ---
+
+def kit_env(kit, arm="ask", **kw):
+    e = {"IK_KIT": str(kit), "IK_ARM": arm, "IK_COST": "ask2.cost", "IK_NEED": "1.00", "IK_STOP": "5.50"}
+    e.update(kw)
+    return e
+
+
+def test_intake_sh_env_bad(tmp_path):
+    (tmp_path / ".devkit").mkdir()
+    pj = tmp_path / "k" / ".claude-plugin"
+    pj.mkdir(parents=True)
+    (pj / "plugin.json").write_text("{}")
+    (tmp_path / "e").mkdir()
+    k = tmp_path / "k"
+    good = kit_env(k)
+    ok = ("ok", "ask", "1")
+    cases = [("only kit", ok, {"IK_KIT": str(k)}, None), ("only arm", ok, {"IK_ARM": "ask"}, None),
+             ("kit+arm only", ok, {"IK_KIT": str(k), "IK_ARM": "ask"}, None),
+             ("empty kit only", ok, {"IK_KIT": ""}, None),
+             ("relative kit", ok, kit_env("k"), tmp_path),
+             ("no plugin.json", ok, kit_env(tmp_path / "e"), None),
+             ("dotdot middle", ok, kit_env(f"{tmp_path}/k/../k"), None),
+             ("dotdot end", ok, kit_env(f"{tmp_path}/k/.claude-plugin/.."), None),
+             ("arm vs arg2", ("ok", "lines", "1"), good, None)]
+    for drop in good:
+        cases.append(("four of five, no " + drop, ok, {a: b for a, b in good.items() if a != drop}, None))
+    for arm in ("Ask", "a-b", "new", "old", "abcdefghi", ""):
+        cases.append(("arm " + repr(arm), ("ok", arm, "1"), kit_env(k, arm), None))
+    for key, vals in (("IK_COST", ("a/b.cost", "x.txt", "", ".cost")), ("IK_NEED", ("1", "x", "0.00", "")),
+                      ("IK_STOP", ("5.5", "x", "", "1.00"))):
+        for v in vals:
+            cases.append((key + "=" + repr(v), ok, kit_env(k, **{key: v}), None))
+    cases.append(("need>stop", ok, kit_env(k, IK_NEED="3.00", IK_STOP="2.00"), None))
+    for label, args, env, cwd in cases:
+        rc, out = sh("intake.sh", *args, home=tmp_path, env=env, cwd=cwd)
+        assert rc == 9 and "인자 틀림" in out, (label, rc, out)
+
+
+def test_intake_sh_env_good_stop_at_home_devkit(tmp_path):
+    (tmp_path / ".devkit").mkdir()
+    pj = tmp_path / "k" / ".claude-plugin"
+    pj.mkdir(parents=True)
+    (pj / "plugin.json").write_text("{}")
+    cases = [(("ok", "ask", "1"), kit_env(tmp_path / "k", IK_COST="intake.cost", IK_NEED="2.50", IK_STOP="8.00")),
+             (("ok", "ask", "1"), kit_env(tmp_path / "k")),
+             (("ok", "k1", "3"), kit_env(tmp_path / "k", "k1")),
+             (("ok", "k0", "2"), kit_env(tmp_path / "k", "k0", IK_COST="p10.cost", IK_NEED="0.50", IK_STOP="12.00")),
+             (("ok", "base", "2"), kit_env(ROOT / "kit", "base"))]
+    for args, env in cases:
+        rc, out = sh("intake.sh", *args, home=tmp_path, env=env)
+        assert rc == 8 and "~/.devkit" in out and "인자 틀림" not in out, (args, env, out)
+
+
+def test_intake_sh_no_env_keeps_arms(tmp_path):
+    for arm in ("ask", "base"):
+        rc, out = sh("intake.sh", "ok", arm, "1", home=tmp_path)
+        assert rc == 9 and "인자 틀림" in out, arm
+    (tmp_path / ".devkit").mkdir()
+    for arm in ("new", "old"):
+        rc, out = sh("intake.sh", "ok", arm, "1", home=tmp_path)
+        assert rc == 8 and "~/.devkit" in out and "인자 틀림" not in out, arm
+
+
+def test_intake_sh_ledger_one_name():
+    t = text("intake.sh")
+    L = t.splitlines()
+    assert '"$O/intake.cost"' not in t and t.count('"$LEDGER"') == 6
+    assert len([x for x in L if '>> "$LEDGER"' in x]) == 3
+    assert len([x for x in L if x == "LEDGER_NAME=${IK_COST-intake.cost}"]) == 1
+    assert len([x for x in L if x == "LEDGER=$O/$LEDGER_NAME"]) == 1
+
+
+def test_intake_sh_money_vars():
+    t = text("intake.sh")
+    L = t.splitlines()
+    rule = [x for x in L if "BEGIN{exit !(s+n>t)}" in x]
+    assert len(rule) == 2 and all('-v n="$NEED" -v t="$STOP"' in x for x in rule)
+    assert "2.50>8.00" not in t
+    assert '돈 멈춤: 합 $spent + $NEED > $STOP' in t
+    assert "skip:money" in rule[1]
+
+
+def test_intake_sh_env_unset_before_claude():
+    t = text("intake.sh")
+    L = t.splitlines()
+    un = [i for i, x in enumerate(L) if "unset IK_KIT IK_ARM IK_COST IK_NEED IK_STOP" in x]
+    assert len(un) == 1
+    first_claude = next(i for i, x in enumerate(L) if "claude -p" in x)
+    ledger = next(i for i, x in enumerate(L) if x == "LEDGER=$O/$LEDGER_NAME")
+    assert ledger < un[0] < first_claude
+    assert "K=$IK_KIT" in t
+    assert [x.strip() for x in lines_with(M / "intake.sh", "--plugin-dir")] == ['PD=(--plugin-dir "$K")']
 
 
 def test_intake_sh_signal_trap():
