@@ -211,6 +211,8 @@ GAPS = [  # (꼬리표, 도구, 입력) — 못 막는 길, 지금은 지나간�
  ("파일에 적어 두었다가 넘기기", "Bash", {"command": "find . -name .env > /tmp/l; xargs cat < /tmp/l"}),
  ("따옴표 안에 통째로 든 명령", "Bash", {"command": "find . -name .env | xargs -I{} sh -c 'cat {}'"}),
  ("작은 프로그램", "Bash", {"command": "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['cat', '.env'])\nPY"}),
+ ("명령으로 써 넣기", "Bash", {"command": "sed -i 's/=.*/=<devkit이 가린 값>/' app.cfg"}),
+ ("Write·Edit 밖의 쓰기 도구", "NotebookEdit", {"notebook_path": "/p/a.ipynb", "new_source": "<devkit이 가린 값>"}),
 ]
 OVER = [  # (꼬리표, 명령, 답) — 잘못 걸리는 것으로 알고 두는 꼴. 꼬리표마다 README "잘못 걸리는 것:" 줄에 같은 글자가 있다
  ("tokenize", "grep -n tokenize src/", "deny"),
@@ -219,6 +221,11 @@ OVER = [  # (꼬리표, 명령, 답) — 잘못 걸리는 것으로 알고 두�
  ("grep -v .env", "ls | grep -v .env | xargs cat", "ask"),
  ("여러 줄 글", "psql app <<'SQL'\n-- cat .env first\nselect 1;\nSQL", "ask"),
 ]
+WRITE_OVER = [  # (꼬리표, 도구, 입력) — 잘못 걸리는 것으로 알고 두는 쓰기. 꼬리표마다 README "잘못 걸리는 것:" 줄에 같은 글자가 있다
+ ("표시 글을 미리 적어 둔 파일", "Write", {"file_path": "/p/app.cfg", "content": "password=<devkit이 가린 값>\nport=1\n"}),
+ ("표시 글 자체를 적는 글", "Write", {"file_path": "/p/notes.md", "content": "가려진 값은 `<devkit이 가린 값>`으로 보인다.\n"}),
+]
+MARK = "<devkit이 가린 값>"
 
 
 # (명령, 답) — 긴 명령도 판정이 2초 안에 끝나야 한다(훅 제한 10초를 넘기면 판정 없이 지나간다)
@@ -551,3 +558,75 @@ def test_project_list_fifo(tmp_path):
 def test_no_real_cwd():
     src = Path(__file__).read_text(encoding="utf-8")
     assert not re.search(r"cwd\s*=\s*[\"']/p[\"']|[\"']cwd[\"']\s*:\s*[\"']/p[\"']", src)
+
+
+WRITE_MARK = [
+    ("Write", {"file_path": "/p/a.py", "content": 'DB_PASSWORD = "<devkit이 가린 값>"\n'}),
+    ("Edit", {"file_path": "/p/a.py", "old_string": "A = 1", "new_string": 'DB_PASSWORD = "<devkit이 가린 값>"'}),
+]
+WRITE_PLAIN = [
+    ("Write", {"file_path": "/p/a.py", "content": "A = 1\n"}),
+    ("Edit", {"file_path": "/p/a.py", "old_string": "A = 1", "new_string": "A = 2"}),
+    ("Edit", {"file_path": "/p/a.py", "old_string": 'DB_PASSWORD = "<devkit이 가린 값>"', "new_string": "A = 2"}),
+]
+
+
+@pytest.mark.parametrize("tool,inp", WRITE_MARK, ids=["write", "edit"])
+def test_write_with_mark_denied(tmp_path, tool, inp):
+    assert G.judge(tool, inp) == ("mask", "")
+    r = run(payload(tool, inp, tmp_path), tmp_path / "home", tmp_path)
+    assert r.returncode == 0 and r.stderr == b""
+    out = r.stdout.decode("ascii")
+    assert out.endswith("\n") and out.count("\n") == 1
+    assert json.loads(out) == {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                     "permissionDecisionReason": G.MASK_TEXT}}
+
+
+@pytest.mark.parametrize("tool,inp", WRITE_PLAIN, ids=["write", "edit", "edit-mark-only-in-old"])
+def test_write_without_mark_silent(tmp_path, tool, inp):
+    assert G.judge(tool, inp) is None
+    r = run(payload(tool, inp, tmp_path), tmp_path / "home", tmp_path)
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+
+
+@pytest.mark.parametrize("tool,inp", WRITE_MARK, ids=["write", "edit"])
+def test_write_mark_off_marker(tmp_path, tool, inp):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / G.MARKER).write_bytes(b"")
+    r = run(payload(tool, inp, tmp_path), home, tmp_path)
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+
+
+def test_prefilled_file():
+    edit = lambda old, new: ("Edit", {"file_path": "/p/a.py", "old_string": old, "new_string": new})
+    # 표시 글이 이미 든 파일 — 다른 줄을 고치는 Edit는 지나간다
+    assert G.judge("Edit", {"file_path": "/p/a.py", "old_string": "A = 1", "new_string": "A = 2"}) is None
+    assert G.judge(*edit("p = <devkit이 가린 값>\nA = 1", "p = <devkit이 가린 값>\nA = 2")) is None
+    # 표시 글이 는 Edit는 거절
+    assert G.judge(*edit("p = <devkit이 가린 값>", "p = <devkit이 가린 값>\nq = <devkit이 가린 값>")) == ("mask", "")
+    assert G.judge("Edit", {"file_path": "/p/a.py", "new_string": "x = <devkit이 가린 값>"}) == ("mask", "")
+    assert G.judge("Edit", {"file_path": "/p/a.py", "old_string": 5, "new_string": "x = <devkit이 가린 값>"}) == ("mask", "")
+    # 통째로 다시 쓰는 Write는 표시 글이 있으면 거절
+    assert G.judge("Write", {"file_path": "/p/a.py", "content": "p = <devkit이 가린 값>\nA = 2\n"}) == ("mask", "")
+    assert G.judge("Write", {"file_path": "/p/a.py", "content": "A = 2\n"}) is None
+    assert G.judge("Write", {"file_path": "/p/a.py", "content": 5}) is None
+
+
+def test_mask_text_rules():
+    text = G.MASK_TEXT
+    assert text.startswith("devkit: ") and "\n" not in text
+    assert MARK in text and "사용자에게 묻는다" in text
+    assert "막아 준다" not in text and "devkit-guard-off" not in text and "AI에게" not in text
+    assert G.MARK == MARK
+
+
+@pytest.mark.parametrize("tag,tool,inp", WRITE_OVER, ids=[str(i) for i in range(len(WRITE_OVER))])
+def test_write_over(tag, tool, inp):
+    assert G.judge(tool, inp) == ("mask", "")
+
+
+def test_write_over_in_readme():
+    line = next(x for x in section() if "**잘못 걸리는 것:**" in x)
+    for tag in {t for t, _, _ in WRITE_OVER}:
+        assert tag in line, tag

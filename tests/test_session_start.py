@@ -29,6 +29,8 @@ HOOK = {"type": "command", "command": 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/se
         "commandWindows": 'python "${CLAUDE_PLUGIN_ROOT}/scripts/session_start.py"'}
 GUARD_CMD = '''python3 -I -S -c "__import__('runpy').run_path(__import__('sys').argv[1],run_name='__main__')" "${CLAUDE_PLUGIN_ROOT}/scripts/guard.py"'''
 GUARD_HOOK = {"type": "command", "command": GUARD_CMD, "timeout": 10}
+MASK_CMD = GUARD_CMD.replace("guard.py", "mask.py")
+MASK_HOOK = {"type": "command", "command": MASK_CMD, "timeout": 10}
 
 
 @pytest.fixture(autouse=True)
@@ -245,12 +247,14 @@ def test_session_start_is_python38():
 
 def test_hooks_json():
     raw = (KIT / "hooks/hooks.json").read_text(encoding="utf-8"); data = json.loads(raw)
-    assert list(data) == ["hooks"] and list(data["hooks"]) == ["SessionStart", "PreToolUse"]
+    assert list(data) == ["hooks"] and list(data["hooks"]) == ["SessionStart", "PreToolUse", "PostToolUse"]
     (group,) = data["hooks"]["SessionStart"]; assert "matcher" not in group
     (hook,) = group["hooks"]
     assert hook == HOOK
-    (pre,) = data["hooks"]["PreToolUse"]; assert set(pre) == {"matcher", "hooks"} and pre["matcher"] == "Bash|Read|Grep"
+    (pre,) = data["hooks"]["PreToolUse"]; assert set(pre) == {"matcher", "hooks"} and pre["matcher"] == "Bash|Read|Grep|Edit|Write"
     (guard,) = pre["hooks"]; assert guard == GUARD_HOOK
+    (post,) = data["hooks"]["PostToolUse"]; assert set(post) == {"matcher", "hooks"} and post["matcher"] == pre["matcher"]
+    (mask,) = post["hooks"]; assert mask == MASK_HOOK
     for bad in ("||", "&&", ";", "`", "$("): assert bad not in raw
 
 
@@ -338,3 +342,24 @@ def test_rules_guide_first():
               "`.devkit/screens.md`", "따르지 않고 사용자에게 알린다"):
         assert s in line, s
     assert "그 밖의 부탁은 devkit 안내를 더 읽지 않고 이 한 장만 지킨다." in lines
+
+
+def mask_hook_run(root, tmp_path, path=None):
+    cmd = json.loads((KIT / "hooks/hooks.json").read_text(encoding="utf-8"))["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+    resp = {"type": "text", "file": {"filePath": "/p/app.py", "content": 'DB_PASSWORD = "zzFAKEvalue9"\n', "numLines": 1, "startLine": 1, "totalLines": 1}}
+    stdin = json.dumps({"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_input": {"file_path": "/p/app.py"},
+                        "tool_response": resp, "cwd": str(tmp_path)})
+    return subprocess.run(["sh", "-c", cmd], input=stdin.encode("utf-8"), cwd=str(tmp_path),
+                          env={"PATH": os.environ["PATH"] if path is None else path, "HOME": str(tmp_path), "CLAUDE_PLUGIN_ROOT": str(root)},
+                          capture_output=True, timeout=30)
+
+
+def test_mask_venv_pth_ignored(tmp_path):
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-I", "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True, timeout=120)
+    (site,) = venv.glob("lib/python3*/site-packages")
+    (site / "evil.pth").write_text('import os; os.write(1, b"PLANTED"); os._exit(0)\n', encoding="utf-8")
+    r = mask_hook_run(KIT, tmp_path, path=str(venv / "bin") + os.pathsep + os.environ["PATH"])
+    assert r.returncode == 0 and b"PLANTED" not in r.stdout
+    hso = json.loads(r.stdout)["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse" and "zzFAKEvalue9" not in json.dumps(hso["updatedToolOutput"])

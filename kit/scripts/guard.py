@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""파일을 열거나 검색하기 직전(훅)에 비밀값이 딸려 나올 꼴을 한 번 더 거른다 (python3 표준 라이브러리만).
+"""파일을 열거나 검색하거나 쓰기 직전(훅)에 비밀값이 딸려 나올 꼴을 한 번 더 거른다 (python3 표준 라이브러리만).
 
 stdin의 JSON(도구 이름·입력)을 읽어, 비밀값 파일 꼴이면 묻고(ask) 비밀 낱말로 찾은 줄을 그대로 찍는 검색이면 막는다(deny).
-걸릴 때 말고는 아무것도 찍지 않는다. 입력을 못 읽으면 조용히 0, 판정 중 예외는 stderr에 ASCII 한 줄과 1.
+Write·Edit로 쓰려는 글에 가려진 값 표시(MARK)가 들면 거절한다(deny). 걸릴 때 말고는 아무것도 찍지 않는다. 입력을 못 읽으면 조용히 0, 판정 중 예외는 stderr에 ASCII 한 줄과 1.
 파일은 읽기만 한다(프로젝트 목록 한 장). 파일을 만들지 않고, 하위 프로세스를 부르지 않는다.
 """
 import sys
@@ -50,6 +50,9 @@ MESSAGES = {
     "deny": "devkit: 비밀번호·키 같은 낱말로 찾은 줄을 그대로 찍는 검색은 막는다(값이 기록에 남는다). "
             "파일 이름만(-l) 또는 개수만(-c) 나오게 바꿔 다시 찾고, 필요한 코드 파일은 그 뒤에 연다. 일은 멈추지 않는다.",
 }
+MARK = "<devkit이 가린 값>"                # mask.py와 따로 적는다(서로 import하지 않는다) — 같은 글자여야 한다
+MASK_TEXT = ("devkit: 쓰려는 글에 가려진 값 표시(<devkit이 가린 값>)가 들어 있어 그대로 쓰면 파일의 진짜 값이 지워진다. "
+             "가려진 줄은 건드리지 않고 다른 줄만 고친다. 값을 바꿔야 하면 사용자에게 묻는다.")
 
 
 def secret_name(path, extra=()):
@@ -296,6 +299,10 @@ def _str(value):
 def judge(tool, tool_input, extra_names=()):
     if not isinstance(tool_input, dict):
         return None
+    if tool == "Write":
+        return ("mask", "") if MARK in _str(tool_input.get("content")) else None
+    if tool == "Edit":   # 표시 글이 늘 때만 — 가려진 줄을 든 덩이의 다른 줄을 고치는 Edit는 지나간다
+        return ("mask", "") if _str(tool_input.get("new_string")).count(MARK) > _str(tool_input.get("old_string")).count(MARK) else None
     if tool == "Read":
         path = _str(tool_input.get("file_path"))
         return ("ask", _last(path)) if secret_name(path, extra_names) else None
@@ -334,8 +341,9 @@ def turned_off():
 
 
 def answer(kind, name=""):
-    reason = MESSAGES[kind].format(name=name)
-    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": kind,
+    reason = MASK_TEXT if kind == "mask" else MESSAGES[kind].format(name=name)
+    decision = "deny" if kind == "mask" else kind
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
                                               "permissionDecisionReason": reason}}) + "\n"
 
 

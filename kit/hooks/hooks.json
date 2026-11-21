@@ -13,11 +13,23 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Read|Grep",
+        "matcher": "Bash|Read|Grep|Edit|Write",
         "hooks": [
           {
             "type": "command",
             "command": "python3 -I -S -c \"__import__('runpy').run_path(__import__('sys').argv[1],run_name='__main__')\" \"${CLAUDE_PLUGIN_ROOT}/scripts/guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Grep|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I -S -c \"__import__('runpy').run_path(__import__('sys').argv[1],run_name='__main__')\" \"${CLAUDE_PLUGIN_ROOT}/scripts/mask.py\"",
             "timeout": 10
           }
         ]
