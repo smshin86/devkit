@@ -28,3 +28,12 @@ def test_start_refs_known():
 def test_start_bytes_clean():
     raw = START.read_bytes()
     assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw and raw.endswith(b"\n")
+
+def test_start_guard_search_line():
+    t = START.read_text(encoding="utf-8")
+    sec = t.split("## 어느 단계에서나 지키는 것\n", 1)[1].split("\n## ", 1)[0]
+    keep = [l for l in sec.splitlines()
+            if l.startswith("- 비밀번호·토큰 같은 낱말이") and "`-l`" in l and "한 줄에 묶지 않는다" in l]
+    assert len(keep) == 1
+    assert "한 번에 하나" in t and "받기 안내가 없으면" in t
+    assert t.splitlines()[-1] == "다음: devkit:intake"
