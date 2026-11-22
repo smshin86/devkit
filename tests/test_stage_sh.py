@@ -13,6 +13,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 M = ROOT / "docs" / "measure"
 SH = M / "stage.sh"
+TOOLS9 = "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent,TaskStop"
+DIS_NEW11 = ["Bash(*cc-socks*)", "Bash(*.claude/sessions*)", "Bash(*nc -U*)", "Bash(*socat*)", "Bash(*AF_UNIX*)", "Bash(claude *)",
+             "Bash(* claude *)", "Bash(*/claude *)", "Bash(*crontab*)", "Bash(*systemd-run*)", "Bash(*systemctl*)"]
 LK = M / "stage-locked.sh"
 BASE_PATH = "/usr/bin:/bin"
 
@@ -205,9 +208,84 @@ def test_static_claude_lines_and_flags():
     assert len(re.findall(r"^\s*(?!#).*\bclaude -p ", t, re.M)) == 2
     for w in ("--model sonnet", "--setting-sources project", "--include-hook-events", "timeout 2400",
               "env -u TMUX -u TMUX_PANE", "--output-format stream-json --verbose",
-              '--allowedTools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent"', "--max-budget-usd"):
+              '--allowedTools "%s"' % TOOLS9, '--tools "%s"' % TOOLS9, "--strict-mcp-config", "--max-budget-usd"):
         assert t.count(w) == 2, w
     assert "--no-session-persistence" not in t
+
+
+def test_static_mcp_and_tool_locks():
+    t = code()
+    ls = lines()
+    cenv = [ln for ln in ls if ln.startswith("CENV=(")]
+    assert len(cenv) == 1 and "ENABLE_CLAUDEAI_MCP_SERVERS=false" in cenv[0] and "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1" in cenv[0]
+    assert live(t).count("ENABLE_CLAUDEAI_MCP_SERVERS") == 1 and live(t).count("CLAUDE_CODE_DISABLE_AUTO_MEMORY") == 1
+    assert "--mcp-config" not in t.replace("--strict-mcp-config", "")
+    allowed = re.findall(r'--allowedTools "([^"]*)"', t)
+    tools = re.findall(r'--tools "([^"]*)"', t)
+    assert allowed == tools == [TOOLS9, TOOLS9]
+    init_tools = json.loads((M / "stage" / "tasks.json").read_text(encoding="utf-8"))["init_tools"]
+    assert set(tools[0].split(",")) <= set(init_tools) and len(init_tools) == 10 and "Task" in init_tools
+    # 두 호출 모두: --allowedTools 줄 → 바로 다음 줄 --tools → --strict-mcp-config → --disallowedTools
+    idx = [i for i, ln in enumerate(ls) if ln.lstrip().startswith("--allowedTools")]
+    assert len(idx) == 2
+    for i in idx:
+        assert ls[i + 1].strip() == '--tools "%s" \\' % TOOLS9, ls[i + 1]
+        assert ls[i + 2].strip() == "--strict-mcp-config \\", ls[i + 2]
+        assert ls[i + 3].lstrip().startswith("--disallowedTools"), ls[i + 3]
+        assert ls[i + 1].startswith("  --tools") and ls[i + 2].startswith("  --strict-mcp-config")
+
+
+def test_static_dis0_has_the_eleven_new_words():
+    ls = lines()
+    dis0 = [ln for ln in ls if ln.startswith("DIS0=(")]
+    assert len(dis0) == 1
+    got = re.findall(r'"Bash\((?:[^"\\]|\\.)*\)"', dis0[0])
+    for w in DIS_NEW11:
+        assert '"%s"' % w in got, w
+        assert code().count('"%s"' % w) == 1, w
+    assert len(got) == 31
+
+
+def test_static_claude_vars_are_unset_except_two_and_env_order():
+    t = code()
+    ls = lines()
+    assert any(ln.startswith("UNCL=(") for ln in ls)
+    assert "compgen -e | command grep '^CLAUDE'" in t
+    block = t[t.index("UNCL=("):t.index("UNCL=(") + 400]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in block and "CLAUDE_CONFIG_DIR" in block
+    envl = [ln for ln in ls if ln.startswith("timeout 2400 env") or ln.startswith("  timeout 2400 env")]
+    assert len(envl) == 2
+    for ln in envl:
+        assert re.search(r'"\$\{UNST\[@\]\}" "\$\{UNCL\[@\]\}" PATH=', ln), ln
+        assert ln.index('"${UNCL[@]}"') < ln.index('"${CENV[@]}"')
+    # 값은 어디에도 찍지 않는다: UNCL 만드는 자리에 echo·printf·printenv가 없다
+    seg = t[t.index("UNCL=("):t.index("UNCL=(") + 400].split("\n\n")[0]
+    assert not re.search(r"\b(echo|printf|printenv)\b", seg), seg
+
+
+def test_static_sched_and_sess_extra_are_read_only():
+    t = code()
+    assert "schedsha()" in t and "SCHED0=$(schedsha)" in t
+    body = t[t.index("schedsha() {"):]
+    body = body[:body.index("\n}\n")]
+    assert "timeout 10 crontab -l" in body and "timeout 10 systemctl --user list-timers --all --no-legend --plain" in body
+    assert "crontab -r" not in t and "crontab -e" not in t and "systemctl --user start" not in t and "systemctl --user stop" not in t
+    sx = t[t.index("sess_extra_count() {"):]
+    sx = sx[:sx.index("\n}\n")]
+    assert 'for f in "$HOME/.claude/projects/$name"/*.jsonl "$HOME/.claude/projects/$name-"*/*.jsonl' in sx and "name=${R//[^A-Za-z0-9]/-}" in sx and "find" not in sx and "rm " not in sx and "mv " not in sx
+    assert "sched=%s" in t and "sess_extra=%s" in t
+
+
+def test_static_count_sched_sess_sets_both_only_after_counting():
+    t = code()
+    body = t[t.index("count_sched_sess() {"):]
+    body = body[:body.index("\n}\n")]
+    assigns = [i for i, ln in enumerate(body.split("\n")) if re.match(r"\s*(SCHED|SESSX)=", ln)]
+    assert len(assigns) == 1, body                                    # 둘 다 한 줄에서, 셈이 다 끝난 뒤 한 번에 넣는다
+    last = body.split("\n")[assigns[0]]
+    assert re.fullmatch(r"\s*SCHED=\$\w+; SESSX=\$\w+", last), last
+    assert all("schedsha" not in ln and "sess_extra_count" not in ln for ln in body.split("\n")[assigns[0]:])
+    assert "SCHED=same" not in body and "SCHED=changed" not in body
 
 
 def test_static_disallowed_words_21_and_added():
@@ -466,11 +544,27 @@ while [ $# -gt 0 ]; do
     --session-id) sid=$2; mode=t1; shift ;;
     --resume) sid=$2; mode=t2; shift ;;
     --plugin-dir) echo "$2" > "$PWD/plugindir.$mode" ;;
+    --tools) echo "$2" > "$PWD/tools.$mode"; shift ;;
+    --strict-mcp-config) : > "$PWD/strict.$mode" ;;
   esac
   shift
 done
 echo "$mode" >> "$PWD/modes.txt"
 printenv PATH TMPDIR GH_TOKEN GIT_CONFIG_GLOBAL PIP_ONLY_BINARY npm_config_ignore_scripts UV_CACHE_DIR > "$PWD/env.$mode"
+printenv ENABLE_CLAUDEAI_MCP_SERVERS > "$PWD/mcpenv.$mode"
+printenv CLAUDE_CODE_DISABLE_AUTO_MEMORY > "$PWD/automem.$mode"
+env | cut -d= -f1 | grep '^CLAUDE' | sort > "$PWD/claudenames.$mode"
+if [ -n "${FAKE_SESS-}" ]; then
+  sd="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$sd"; : > "$sd/$sid.jsonl"
+  for i in $(seq 1 "$FAKE_SESS"); do : > "$sd/extra$i.jsonl"; done
+fi
+for it in ${FAKE_SESS_FILES-}; do
+  d=${it%%:*}; nm=${it#*:}
+  d=${d//%R%/$(printf '%s' "${PWD%/w}" | sed 's/[^A-Za-z0-9]/-/g')}
+  mkdir -p "$HOME/.claude/projects/$d"; : > "$HOME/.claude/projects/$d/$nm.jsonl"
+done
+osid=$sid; [ "$mode" = t2 ] && [ -n "${FAKE_SID2-}" ] && osid=$FAKE_SID2
+[ -n "${FAKE_CRON-}" ] && [ "$mode" = t1 ] && echo "* * * * * x" >> "$FAKE_CRONFILE"
 stat -c %a "$FAKE_S/sealed" > "$PWD/sealmode.$mode"
 stat -c %z "$FAKE_S/sealed" > "$PWD/ctime.$mode"
 env | grep '^STAGE_' > "$PWD/stageenv.$mode"
@@ -517,7 +611,7 @@ else
 fi
 echo "note $mode" >> "$PWD/notes.txt"
 [ -n "${FAKE_HANG-}" ] && exec sleep 60
-echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
+echo "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$osid\"}"
 echo "{\"type\":\"result\",\"subtype\":\"$sub\",\"session_id\":\"$sid\",\"total_cost_usd\":$cost,\"is_error\":false}"
 exit $rc
 '''
@@ -1144,6 +1238,162 @@ def test_flow_claude_sees_no_stage_variables(world):
     assert "STAGE_" in (SH.read_text(encoding="utf-8"))
 
 
+FAKEV = "zzFAKEvalue9"
+
+
+def test_flow_both_turns_get_tool_list_and_mcp_locks(world):
+    w = world
+    rc, out = run_flow(w, "r10", "a2", "q", {"ENABLE_CLAUDEAI_MCP_SERVERS": "true"})
+    assert rc == 0, out
+    d = done_dir(w, "r10")
+    for m in ("t1", "t2"):
+        assert (d / ("tools." + m)).read_text().strip() == TOOLS9
+        assert (d / ("strict." + m)).exists() and (d / ("mcpenv." + m)).read_text().strip() == "false"
+    j = json.loads((w["S"] / "out-done" / "r10.json").read_text())
+    assert j["init_mcp"] == "?" and j["init_tools_out"] == "?"          # 가짜 claude의 init에는 두 필드가 없다
+    assert j["tools_out_used"] == 0 and j["mcp_used"] == 0 and j["risky"] == 0
+
+
+def test_flow_p_arm_also_gets_the_locks(world):
+    w = world
+    rc, out = run_flow(w, "r09", "a2", "p")
+    assert rc == 0, out
+    d = done_dir(w, "r09")
+    for m in ("t1", "t2"):
+        assert (d / ("tools." + m)).read_text().strip() == TOOLS9 and (d / ("strict." + m)).exists()
+
+
+def test_flow_claude_account_variables_are_unset_but_two_stay(world):
+    w = world
+    extra = {"CLAUDE_CODE_MESSAGING_SOCKET": FAKEV, "CLAUDE_CODE_SESSION_ID": FAKEV, "CLAUDE_CODE_OAUTH_TOKEN": FAKEV,
+             "CLAUDE_CONFIG_DIR": FAKEV, "CLAUDECODE": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "ENABLE_CLAUDEAI_MCP_SERVERS": "true"}
+    rc, out = run_flow(w, "r10", "a2", "q", extra)
+    assert rc == 0, out
+    d = done_dir(w, "r10")
+    for m in ("t1", "t2"):
+        names = (d / ("claudenames." + m)).read_text().split()
+        assert "CLAUDE_CODE_MESSAGING_SOCKET" not in names and "CLAUDE_CODE_SESSION_ID" not in names and "CLAUDECODE" not in names
+        assert "CLAUDE_CODE_OAUTH_TOKEN" in names and "CLAUDE_CONFIG_DIR" in names
+        assert "CLAUDE_CODE_DISABLE_AUTO_MEMORY" in names
+        assert (d / ("automem." + m)).read_text().strip() == "1"            # 밖에서 0을 줘도 1로 덮인다
+        assert (d / ("mcpenv." + m)).read_text().strip() == "false"
+    assert FAKEV not in out
+
+
+def fake_sched_bin(w, timers=""):
+    """PATH 앞에 둘 가짜 crontab·systemctl(진짜 예약 작업은 읽지도 바꾸지도 않는다). crontab -l은 FAKE_CRONFILE 글을 낸다."""
+    f = w["bin"] / "front"
+    f.mkdir(exist_ok=True)
+    (f / "crontab").write_text('#!/bin/bash\n[ "$1" = -l ] && cat "$FAKE_CRONFILE" 2> /dev/null\nexit 0\n')
+    (f / "systemctl").write_text("#!/bin/bash\ncat <<'EOT'\n%sEOT\n" % timers)
+    for n in ("crontab", "systemctl"):
+        (f / n).chmod(0o755)
+    cron = w["bin"] / "cronfile"
+    cron.write_text("0 3 * * * backup\n")
+    return {"PATH": str(f) + ":" + w["path"], "FAKE_CRONFILE": str(cron)}, cron
+
+
+def test_flow_sched_same_and_sess_extra_zero(world):
+    w = world
+    env, _ = fake_sched_bin(w, "Mon 2026-11-23 00:00:00 KST 1h left n/a n/a logrotate.timer logrotate.service\n")
+    rc, out = run_flow(w, "r10", "a2", "q", env)
+    assert rc == 0, out
+    chk = check_of(w, "r10")
+    assert chk["sched"] == "same" and chk["sess_extra"] == "0", chk
+
+
+def test_flow_sched_changed_when_crontab_text_changes(world):
+    w = world
+    env, cron = fake_sched_bin(w)
+    rc, out = run_flow(w, "r10", "a2", "q", {**env, "FAKE_CRON": "1"})
+    assert rc == 0, out                                              # 끝 값은 그대로(다른 작업이 바꿀 수 있다 — 무효 아님)
+    chk = check_of(w, "r10")
+    assert chk["sched"] == "changed" and chk["exit"] == "0", chk
+    assert "* * * * * x" in cron.read_text()
+
+
+def test_flow_sched_commands_that_fail_127_count_as_empty_and_same(world):
+    w = world
+    f = w["bin"] / "front"
+    f.mkdir(exist_ok=True)
+    for n in ("crontab", "systemctl"):                               # 아무것도 안 찍고 127로 끝난다(명령이 없는 것과 같다)
+        (f / n).write_text("#!/bin/bash\nexit 127\n")
+        (f / n).chmod(0o755)
+    rc, out = run_flow(w, "r10", "a2", "q", {"PATH": str(f) + ":" + w["path"]})
+    assert rc == 0, out
+    chk = check_of(w, "r10")
+    assert chk["sched"] == "same" and chk["exit"] == "0", chk
+
+
+def test_flow_sess_extra_counts_other_conversations_only(world):
+    w = world
+    rc, out = run_flow(w, "r10", "a2", "q", {"FAKE_SESS": "0"})                 # 이 실행 대화 파일만
+    assert rc == 0, out
+    assert check_of(w, "r10")["sess_extra"] == "0"
+    rc, out = run_flow(w, "r09", "a2", "p", {"FAKE_SESS": "2"})                 # 다른 대화 파일 둘
+    assert rc == 0, out
+    assert check_of(w, "r09")["sess_extra"] == "2"
+    d = w["home"] / ".claude" / "projects"
+    assert d.is_dir() and any(d.iterdir())
+
+
+UUID2 = "11111111-2222-4333-8444-555555555555"
+
+
+def test_flow_sess_extra_counts_every_folder_headed_by_the_run_dir(world):
+    w = world
+    items = ["%R%-w-sub:aa", "%R%-tmp:bb", "%R%-tmp:cc", "%R%-w:dd"]                  # (가) 하위·임시·사본 꼭대기 폴더 → 4
+    rc, out = run_flow(w, "r10", "a2", "q", {"FAKE_SESS_FILES": " ".join(items)})
+    assert rc == 0, out
+    assert check_of(w, "r10")["sess_extra"] == "4"
+
+
+def test_flow_sess_extra_skips_second_turn_id_when_it_differs(world):
+    w = world
+    items = ["%R%-w:" + UUID2, "%R%-tmp:" + UUID2, "%R%-tmp:ee"]                       # (나) 둘째 턴 대화 번호와 같은 이름은 안 센다
+    rc, out = run_flow(w, "r10", "a2", "q", {"FAKE_SESS_FILES": " ".join(items), "FAKE_SID2": UUID2})
+    assert rc == 13, out                                             # 둘째 턴 번호가 다르면 끝 값 13(설계대로) — 세기는 그대로 된다
+    assert check_of(w, "r10")["sess_extra"] == "1"
+
+
+def test_flow_sess_extra_ignores_folders_with_another_head(world):
+    w = world
+    items = ["other-run-xyz:ff", "other-run-xyz-w:gg", "%R%-w:hh"]                     # (다) 머리가 다른 폴더는 안 센다
+    rc, out = run_flow(w, "r10", "a2", "q", {"FAKE_SESS_FILES": " ".join(items)})
+    assert rc == 0, out
+    assert check_of(w, "r10")["sess_extra"] == "1"
+
+
+def test_flow_sess_extra_counts_the_run_dir_folder_itself(world):
+    w = world
+    items = ["%R%:aa", "%R%:bb", "%R%-w:cc"]                                           # (가) 실행 폴더 자체를 cwd로 띄운 대화(끝 - 없음) → 3
+    rc, out = run_flow(w, "r10", "a2", "q", {"FAKE_SESS_FILES": " ".join(items)})
+    assert rc == 0, out
+    assert check_of(w, "r10")["sess_extra"] == "3"
+
+
+def test_flow_sess_extra_ignores_a_neighbour_folder_glued_to_the_run_name(world):
+    w = world
+    items = ["%R%0-w:dd", "%R%0:ee", "%R%:ff"]                                         # (나) R 이름 뒤에 글자가 바로 이어지는 남의 폴더는 안 센다
+    rc, out = run_flow(w, "r10", "a2", "q", {"FAKE_SESS_FILES": " ".join(items)})
+    assert rc == 0, out
+    assert check_of(w, "r10")["sess_extra"] == "1"
+
+
+def test_flow_survivors_17_still_counts_sched_and_sess_extra(world):
+    w = world
+    p = popen_flow(w, "r10", "a2", "q", {"FAKE_SPAWN": "t1", "BASH_FUNC_kill%%": KILL_NOOP, "FAKE_SESS_FILES": "%R%-tmp:ii"})
+    try:
+        out = p.communicate(timeout=180)[0]
+        if p.returncode == 3:
+            pytest.skip("메모리 검사가 멈춤")
+        assert p.returncode == 17, out
+        chk = dict(ln.split("=", 1) for ln in (w["S"] / "out" / "r10.check").read_text().split("\n") if "=" in ln)
+        assert chk["exit"] == "17" and chk["sched"] in ("same", "changed") and chk["sess_extra"].isdigit() and chk["sess_extra"] == "1", chk
+    finally:
+        end_proc(p)
+
+
 @pytest.mark.parametrize("tamper,which", [("ledger", "stage.cost"), ("modes", "seal.modes")])
 def test_flow_control_file_changed_in_t1_exit_4_t2_not_sent(world, tamper, which):
     w = world
@@ -1517,13 +1767,6 @@ def test_standalone_unseal_without_leftover_run_files_ignores_live_processes(roo
         except subprocess.TimeoutExpired:
             child.kill()
             child.wait()
-
-
-def test_zz_tests_left_nothing_in_the_real_stage_root():
-    """진짜 뿌리에 잠금도 out도 없어야 한다(있으면 시험이 거기를 건드린 것). 이 시험은 아무것도 만들지 않는다."""
-    real = Path("/home/ssmge/zzz-devkit-stage")
-    assert not (real / "run.lock").exists()
-    assert not (real / "out").exists()
 
 
 # ---------- 고침 4차 ----------

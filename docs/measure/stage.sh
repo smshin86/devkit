@@ -1,7 +1,7 @@
 #!/bin/bash
 # 부르는 꼴: bash stage.sh <…> — 셔뱅은 있어도 실행 비트는 없고(drvfs는 비트를 못 가림) 늘 bash로 부른다. 안의 stage.py는 늘 python3 -I -B로 부른다.
 # stage.sh <run> <task> <arm> — 연습 무대 한 번. 부탁 글(첫 턴)과 답 글(둘째 턴)을 새 사본에서 같은 대화로 보내고, 뒤에 검사·끝 커밋·세기를 한다.
-# run: r01~r12(본 차례) · z01~z03(0번 걸음) · vNN(무효를 메움) · xNN(다시 돌리기). task: a1 a2 b1 b2 c1 c2 z0. arm: p(켬) · q(끔).
+# run: r01~r12(본 차례) · z01~z07(0번 걸음 · z06·z07은 예비) · vNN(무효를 메움) · xNN(다시 돌리기). task: a1 a2 b1 b2 c1 c2 z0. arm: p(켬) · q(끔).
 # 따로 부르기: stage.sh seal · stage.sh unseal(봉한 뿌리의 아래 폴더 chmod) · stage.sh kitsha [폴더](꾸러미 트리 sha).
 # 뿌리: S(봉한 뿌리 — STAGE_S, 기본 /home/ssmge/zzz-devkit-stage) · X(AI가 보는 뿌리 — STAGE_X, 기본 /home/ssmge/zzz-w).
 # 돈은 S/out/stage.cost(x 실행은 stage-x.cost) 한 줄씩 스스로 적는다. 세는 것은 stage.py가 한다. 끝 값 표는 계획 5-8절과 19절.
@@ -374,7 +374,7 @@ fi
 
 # --- 환경과 막을 낱말 ---
 CLEAN=$(printf '%s' "$PATH" | tr ':' '\n' | command grep -v -E '^/mnt/[a-z]/' | paste -sd:)
-CENV=(TMUX_TMPDIR="$R/nosock" TMPDIR="$R/tmp" GH_CONFIG_DIR="$R/gh" GH_TOKEN= npm_config_userconfig="$R/npmrc" npm_config_ignore_scripts=true GIT_CONFIG_GLOBAL="$R/gitconfig" UV_CACHE_DIR="$R/uv" UV_PYTHON_DOWNLOADS=never PIP_ONLY_BINARY=:all:)
+CENV=(TMUX_TMPDIR="$R/nosock" TMPDIR="$R/tmp" GH_CONFIG_DIR="$R/gh" GH_TOKEN= npm_config_userconfig="$R/npmrc" npm_config_ignore_scripts=true GIT_CONFIG_GLOBAL="$R/gitconfig" UV_CACHE_DIR="$R/uv" UV_PYTHON_DOWNLOADS=never PIP_ONLY_BINARY=:all: ENABLE_CLAUDEAI_MCP_SERVERS=false CLAUDE_CODE_DISABLE_AUTO_MEMORY=1)
 case "$ST" in
   a) FRONT=; EXTRA=(PIP_REQUIRE_VIRTUALENV=1 PIP_USER=0 PIP_CACHE_DIR="$R/pipcache" npm_config_prefix="$R/npm-prefix" npm_config_cache="$R/npmcache" npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false) ;;
   b) FRONT="$X/env/b/bin:"; EXTRA=() ;;
@@ -385,7 +385,7 @@ case "$ARM" in
   q) PD=() ;;
 esac
 DIS_NPM=("Bash(npm *)")
-DIS0=("Bash(npx *)" "Bash(yarn *)" "Bash(pnpm *)" "Bash(bun *)" "Bash(corepack *)" "Bash(kill *)" "Bash(* kill *)" "Bash(* kill)" "Bash(*/kill *)" "Bash(*\"kill *)" "Bash(*'kill *)" "Bash(*pkill*)" "Bash(*killall*)" "Bash(*fuser*)" "Bash(*tmux*)" "Bash(*wsl.exe*)" "Bash(*cmd.exe*)" "Bash(*powershell*)" "Bash(*taskkill*)" "Bash(*Stop-Process*)")
+DIS0=("Bash(npx *)" "Bash(yarn *)" "Bash(pnpm *)" "Bash(bun *)" "Bash(corepack *)" "Bash(kill *)" "Bash(* kill *)" "Bash(* kill)" "Bash(*/kill *)" "Bash(*\"kill *)" "Bash(*'kill *)" "Bash(*pkill*)" "Bash(*killall*)" "Bash(*fuser*)" "Bash(*tmux*)" "Bash(*wsl.exe*)" "Bash(*cmd.exe*)" "Bash(*powershell*)" "Bash(*taskkill*)" "Bash(*Stop-Process*)" "Bash(*cc-socks*)" "Bash(*.claude/sessions*)" "Bash(*nc -U*)" "Bash(*socat*)" "Bash(*AF_UNIX*)" "Bash(claude *)" "Bash(* claude *)" "Bash(*/claude *)" "Bash(*crontab*)" "Bash(*systemd-run*)" "Bash(*systemctl*)")
 DIS_ALL=("Bash(*zzz-devkit-stage/sealed*)" "Bash(*zzz-devkit-stage/src-*)" "Bash(*zzz-devkit-stage/bases*)" "Bash(*zzz-devkit-stage/walkkit*)" "Bash(*devkit/docs*)" "Bash(gh *)" "Bash(* gh *)")
 DIS_B=("Bash(*pip *)" "Bash(*pip3 *)" "Bash(*uv *)" "Bash(*conda *)")
 DIS_C=("Bash(*curl*)" "Bash(*wget*)" "Bash(*git fetch*)" "Bash(*git clone*)" "Bash(*git pull*)")
@@ -404,11 +404,45 @@ dotsha() {
   done | paste -sd' '
 }
 dkstat() { git --no-optional-locks -c gc.auto=0 -C "$DK" status --porcelain 2> /dev/null | sha256sum | cut -d' ' -f1; }
-KIT0=$(kitsha "$X/env/kit"); DOT0=$(dotsha); DK0=$(dkstat)
+# 예약 작업 지문: crontab -l 글 + user 타이머 목록의 마지막 두 칸(이름)만 정렬한 글의 sha256. 읽기만 한다 — 명령이 없거나 실패하면 빈 글
+schedsha() {
+  {
+    timeout 10 crontab -l 2> /dev/null
+    echo "--timers--"
+    timeout 10 systemctl --user list-timers --all --no-legend --plain 2> /dev/null | awk 'NF>=2{print $(NF-1), $NF}' | LC_ALL=C sort
+  } | sha256sum | cut -d' ' -f1
+}
+# 이 실행 대화(SID · 둘째 턴 id가 달랐으면 그것도) 말고, 실행 폴더 R 자체 이름의 대화 폴더와 R 이름에 `-`가 이어진 대화 폴더(사본 꼭대기 · 그 하위 · 임시 폴더 따위) 바로 아래 *.jsonl의 수. 읽기만 한다 — 폴더가 없으면 0
+sess_extra_count() {
+  local LC_ALL=C
+  local name=${R//[^A-Za-z0-9]/-} f b n=0
+  for f in "$HOME/.claude/projects/$name"/*.jsonl "$HOME/.claude/projects/$name-"*/*.jsonl; do
+    [ -e "$f" ] || continue
+    b=${f##*/}; b=${b%.jsonl}
+    [ "$b" = "$SID" ] && continue
+    [ -n "${sid2-}" ] && [ "$b" = "$sid2" ] && continue
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+# 예약 작업·다른 대화 세기: 세기만 한다(끝 값은 안 바꾼다 — 다른 사람 작업이 바꿀 수 있다). 신호 갈래(143)만 못 세고 남는다
+# 판정은 지역 변수로 끝낸 뒤 한 번에 넣는다 — 기다리는 사이 신호가 와도 확인 안 한 값이 .check에 안 적힌다
+count_sched_sess() {
+  local s=changed x
+  [ "$SCHED0" = "$(schedsha)" ] && s=same
+  x=$(sess_extra_count)
+  SCHED=$s; SESSX=$x
+}
+KIT0=$(kitsha "$X/env/kit"); DOT0=$(dotsha); DK0=$(dkstat); SCHED0=$(schedsha)
 
 # claude에게는 STAGE_* 가 하나도 안 간다(뿌리 · 장부 · 잠금 표시를 알려 주지 않는다): 알려진 이름 + 지금 환경에 있는 STAGE_ 로 시작하는 모두
 UNST=(-u STAGE_S -u STAGE_X -u STAGE_CUM -u STAGE_OVER12 -u STAGE_TASKS -u STAGE_CLAUDE -u STAGE_VENV_B -u STAGE_VENV_C -u STAGE_LOCKED)
 for v in $(compgen -e | command grep '^STAGE_'); do UNST+=(-u "$v"); done
+# 계정·이 대화 줄기 변수: 환경의 CLAUDE* 이름 모두 지운다(이름만 다룬다). 인증 토큰과 설정 폴더 둘만 남긴다. CENV의 못 박은 값이 이기도록 env 줄에서 UNST 바로 뒤 · PATH= 앞에 둔다
+UNCL=()
+for v in $(compgen -e | command grep '^CLAUDE'); do
+  case "$v" in CLAUDE_CODE_OAUTH_TOKEN|CLAUDE_CONFIG_DIR) ;; *) UNCL+=(-u "$v") ;; esac
+done
 
 # 대화 번호: 첫 턴에 정해 주고, 둘째 턴이 같은 대화를 잇는다
 SID=$(cat /proc/sys/kernel/random/uuid)
@@ -542,8 +576,8 @@ survivor_note() {
   fi
 }
 
-# .check: 센 것을 한 곳에. exit와 kitsha는 끝에서 정한다
-rc1=-; rc2=-; secs1=-; secs2=-; secs=-; T2=-; rc=-; committed=-; ENDC=; LEFT1=0; LEFT=0; KITSTATE=same; craw1=-; craw2=-; BADL=0; SEALBAD=0; CTLBAD=0; MEM2=0; CTL0=
+# .check: 센 것을 한 곳에. exit와 kitsha는 끝에서 정한다. sched=-·sess_extra=- 는 "모름"(신호 143 갈래만 못 세고 남는다)
+rc1=-; rc2=-; secs1=-; secs2=-; secs=-; T2=-; rc=-; committed=-; ENDC=; LEFT1=0; LEFT=0; KITSTATE=same; craw1=-; craw2=-; SCHED=-; SESSX=-; BADL=0; SEALBAD=0; CTLBAD=0; MEM2=0; CTL0=
 # 턴 앞뒤 통제 파일(장부 둘 · seal.modes)의 sha·줄 수·모드. AI가 쓸 수 있는 S/out에 있어서 턴 동안 바뀌었는지 본다
 ctlsig() {
   local f
@@ -568,8 +602,8 @@ turnaudit() {
   [ "$(ctlsig)" = "$CTL0" ] || CTLBAD=1
 }
 write_check() {
-  printf 'run=%s\ntask=%s\narm=%s\nown=%s\nrc1=%s\nrc2=%s\nsecs1=%s\nsecs2=%s\nsecs=%s\nt2=%s\nrc=%s\ntests=-\nlint=-\nfmt=-\ncommitted=%s\ncum=%s\ncost_raw1=%s\ncost_raw2=%s\nbase=%s\nend_commit=%s\nleft1=%s\nleft=%s\nexit=%s\nkitsha=%s\nseal_broken=%s\n' \
-    "$RUN" "$TASK" "$ARM" "$OWN" "$rc1" "$rc2" "$secs1" "$secs2" "$secs" "$T2" "$rc" "$committed" "$CUM" "$craw1" "$craw2" "$BASEC" "$ENDC" "$LEFT1" "$LEFT" "$1" "$KITSTATE" "$SEALBAD" > "$OP.check"
+  printf 'run=%s\ntask=%s\narm=%s\nown=%s\nrc1=%s\nrc2=%s\nsecs1=%s\nsecs2=%s\nsecs=%s\nt2=%s\nrc=%s\ntests=-\nlint=-\nfmt=-\ncommitted=%s\ncum=%s\ncost_raw1=%s\ncost_raw2=%s\nbase=%s\nend_commit=%s\nleft1=%s\nleft=%s\nexit=%s\nkitsha=%s\nseal_broken=%s\nsched=%s\nsess_extra=%s\n' \
+    "$RUN" "$TASK" "$ARM" "$OWN" "$rc1" "$rc2" "$secs1" "$secs2" "$secs" "$T2" "$rc" "$committed" "$CUM" "$craw1" "$craw2" "$BASEC" "$ENDC" "$LEFT1" "$LEFT" "$1" "$KITSTATE" "$SEALBAD" "$SCHED" "$SESSX" > "$OP.check"
 }
 
 # 끝난 실행은 옮긴다: 사본 → S/done/<run> · S/out/<run>.* → S/out-done/ (장부와 로그는 남김). 봉한 폴더를 먼저 풀어 둔 뒤에 부른다
@@ -631,11 +665,13 @@ cd "$W" || exit 9
 # --- 첫 턴 ---
 TURN=t1; echo t1 > "$OP.turn"
 SEALED_NOW=1; seal_all; DSIG=$(dsig); CTL0=$(ctlsig)
-timeout 2400 env -u TMUX -u TMUX_PANE "${UNST[@]}" PATH="$SHIM$FRONT$CLEAN" "${CENV[@]}" "${EXTRA[@]}" claude -p "$PROMPT" --session-id "$SID" "${PD[@]}" \
+timeout 2400 env -u TMUX -u TMUX_PANE "${UNST[@]}" "${UNCL[@]}" PATH="$SHIM$FRONT$CLEAN" "${CENV[@]}" "${EXTRA[@]}" claude -p "$PROMPT" --session-id "$SID" "${PD[@]}" \
   --setting-sources project \
   --model sonnet \
   --max-budget-usd "$CAP" \
-  --allowedTools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent" \
+  --allowedTools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent,TaskStop" \
+  --tools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent,TaskStop" \
+  --strict-mcp-config \
   --disallowedTools "${DIS[@]}" \
   --output-format stream-json --verbose --include-hook-events \
   < /dev/null > "$OP.t1.jsonl" 2> "$OP.t1.err" &
@@ -702,11 +738,13 @@ rc2=-; secs2=-; T2DIFF=0; LEFT=$LEFT1
 if [ "$T2" = sent ]; then
   TURN=t2; t2s=$(date +%s); echo t2 > "$OP.turn"
   CTL0=$(ctlsig)
-  timeout 2400 env -u TMUX -u TMUX_PANE "${UNST[@]}" PATH="$SHIM$FRONT$CLEAN" "${CENV[@]}" "${EXTRA[@]}" claude -p "$REPLY" --resume "$SID" "${PD[@]}" \
+  timeout 2400 env -u TMUX -u TMUX_PANE "${UNST[@]}" "${UNCL[@]}" PATH="$SHIM$FRONT$CLEAN" "${CENV[@]}" "${EXTRA[@]}" claude -p "$REPLY" --resume "$SID" "${PD[@]}" \
   --setting-sources project \
   --model sonnet \
   --max-budget-usd "$CAP2" \
-  --allowedTools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent" \
+  --allowedTools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent,TaskStop" \
+  --tools "Read,Glob,Grep,Skill,Bash,Write,Edit,Agent,TaskStop" \
+  --strict-mcp-config \
   --disallowedTools "${DIS[@]}" \
   --output-format stream-json --verbose --include-hook-events \
   < /dev/null > "$OP.t2.jsonl" 2> "$OP.t2.err" &
@@ -741,6 +779,7 @@ secs=$(( $(date +%s) - T0 ))
 if [ "${#SURV[@]}" -gt 0 ]; then
   if [ "$T2" = sent ]; then rc=$rc2; else rc=$rc1; fi
   why survivors
+  count_sched_sess
   write_check 17
   survivor_note
   count_log
@@ -775,6 +814,7 @@ if [ "$KIT0" != "$KIT1" ] || { [ -n "$PREP" ] && [ "$PREP" != "$KIT1" ]; }; then
 CH16=0
 [ "$DOT0" = "$(dotsha)" ] || CH16=1
 [ "$DK0" = "$(dkstat)" ] || CH16=1
+count_sched_sess
 
 # 끝 값 차례(여럿이면 앞의 것): 16 → 10 → 11 → 14 → 6 → 13 → 12(둘째 턴 앞 메모리 검사가 멈췄으면 3) → 5. 그 위에 통제 파일 바뀜·장부 틀림 4 → 봉한 폴더 풀림 17 → 낮은 커밋 143
 EX=0
