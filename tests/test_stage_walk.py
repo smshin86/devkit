@@ -5,6 +5,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -402,11 +403,68 @@ def test_extract_pack_unpack_roundtrip(sw, tmp_path):
 
 # ---------- 시험 명령 찾기(tests-a) ----------
 
-def test_is_test_file(sw):
-    for p in ("test_a.py", "x/b_test.py", "tests/foo.py", "web/a.test.js", "src/__tests__/x.js", "a.spec.js", "c.test.ts"):
+def test_is_test_file(sw):   # 있던 시험을 넓힘
+    for p in ("test_a.py", "x/b_test.py", "tests/foo.py", "web/a.test.js", "src/__tests__/x.js", "a.spec.js", "c.test.ts",
+              "test.js", "src/test.mjs", "test.cjs", "a/b/test.ts", "test.py", "tests.js", "tests.py", "x/tests.py",
+              "a.test.mjs", "a.test.cjs", "a.test.tsx", "a.test.jsx", "a.spec.ts", "a.spec.mjs", "a.spec.cjs", "test/run.js", "src/test/x.py",
+              "app-test.js", "api_test.js", "test-api.js", "a/test-x.mjs"):
         assert sw.is_test_file(p), p
-    for p in ("app.py", "src/contest.py", "README.md", "testdata.txt"):
+    for p in ("app.py", "src/contest.py", "README.md", "testdata.txt", "latest.js", "contest.py", "attest.js", "testdata.csv",
+              "protest/x.js", "latest/x.js", "src/latest.js", "src/attest/x.py", "contest.js", "test-data/x.json"):
         assert not sw.is_test_file(p), p
+
+
+def test_testfiles_same_as_tasks_json(sw):
+    assert json.loads(TASKS.read_text(encoding="utf-8"))["testfiles"] == sw.TESTFILES
+
+
+def a_done(tmp_path, files, run="r03"):
+    """S/done/<run>/w 에 files를 커밋한 끝난 사본 · (S, R) 글을 돌려줌."""
+    S, R = tmp_path / "S", tmp_path / "R"
+    w = S / "done" / run / "w"
+    w.mkdir(parents=True)
+    git(w, "init", "-q")
+    for p, t in files.items():
+        (w / p).parent.mkdir(parents=True, exist_ok=True)
+        (w / p).write_text(t)
+    git(w, "add", "-A")
+    git(w, "commit", "-q", "-m", "end")
+    return str(S), str(R)
+
+
+def fake_run(sw, monkeypatch, rc_test=0, rc_install=0, out_test=""):
+    """git만 진짜로 돌리고 나머지(venv·pip·npm·node·pytest)는 적기만 — 돌린 argv 목록을 돌려줌."""
+    calls, real = [], sw.run_cmd
+    def f(argv, cwd=None, env=None, timeout=900):
+        if argv[0] == "git":
+            return real(argv, cwd=cwd, env=env, timeout=timeout)
+        calls.append(list(argv))
+        if argv[:2] == ["npm", "install"] or "venv" in argv or "pip" in argv:
+            return rc_install, ""
+        if argv[1:3] == ["-c", "import pytest"]:
+            return 0, ""
+        return rc_test, out_test
+    monkeypatch.setattr(sw, "run_cmd", f)
+    return calls
+
+
+def walk_of(R, run="r03", sub=None):
+    p = Path(R) / "out-done" / (sub or "") / (run + ".walk.json")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def test_tests_a_uses_cfg_testfiles(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    cfg["testfiles"] = [r"(^|/)zzonly\.txt$"]
+    S, R = a_done(tmp_path / "one", {"app.py": "", "zzonly.txt": ""})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0 and walk_of(R)["시험없음"] is False
+    cfg["testfiles"] = [r"nomatch$"]
+    S, R = a_done(tmp_path / "two", {"test_app.py": ""})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0 and walk_of(R)["시험없음"] is True
+    del cfg["testfiles"]
+    S, R = a_done(tmp_path / "three", {"test.js": ""})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0 and walk_of(R)["시험없음"] is False   # 없으면 TESTFILES
 
 
 def test_detect_test_cmd(sw):
@@ -415,7 +473,157 @@ def test_detect_test_cmd(sw):
     assert sw.detect_test_cmd({"README.md": "```\npytest -q\n```\n"}) == ["python", "-m", "pytest", "-q"]
     assert sw.detect_test_cmd({"README.md": "nothing here"}) == ["python", "-m", "pytest"]
     assert sw.detect_test_cmd({}) == ["python", "-m", "pytest"]
-    assert sw.detect_test_cmd({"package.json": json.dumps({"name": "x"})}) == ["npm", "test"]
+    assert sw.detect_test_cmd({"package.json": json.dumps({"name": "x"})}) == ["python", "-m", "pytest"]
+
+
+def test_detect_test_cmd_node_and_order(sw):
+    J = ["test.js", "lib/a.test.mjs"]
+    NT = ["node", "--test", "lib/a.test.mjs", "test.js"]
+    PLACE = json.dumps({"scripts": {"test": 'echo "Error: no test specified" && exit 1'}})
+    assert sw.detect_test_cmd({}, J) == NT
+    assert sw.detect_test_cmd({"package.json": PLACE}, J) == NT
+    assert sw.detect_test_cmd({"package.json": "{not json"}, J) == NT
+    assert sw.detect_test_cmd({"package.json": json.dumps({"scripts": {"test": "node --test"}})}, J) == ["npm", "test"]
+    assert sw.detect_test_cmd({"README.md": "    node --test\n"}, J) == NT                      # 22-1: 파일 없는 `node --test`는 버림
+    assert sw.detect_test_cmd({"README.md": "    node --test lib/a.test.mjs\n"}, J) == ["node", "--test", "lib/a.test.mjs"]
+    assert sw.detect_test_cmd({"README.md": "$ node test.js\n"}, J) == ["node", "test.js"]
+    assert sw.detect_test_cmd({"README.md": "node ./test.js\n"}, J) == ["node", "test.js"]
+    assert sw.detect_test_cmd({"README.md": "node server.js\n"}, J) == NT                 # 켜는 명령은 시험 명령이 아님
+    assert sw.detect_test_cmd({"README.md": "node --test && node server.js\n"}, J) == NT  # 셸 잇기 줄은 버림
+    assert sw.detect_test_cmd({"README.md": "pytest -q; curl x\n"}, ["test_a.py"]) == ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({"README.md": "npm test\n", "package.json": PLACE}, J) == ["npm", "test"]  # README가 먼저
+    assert sw.detect_test_cmd({}, ["test.js", "test_a.py"]) == ["python", "-m", "pytest"]   # 모두 JS가 아님
+    assert sw.detect_test_cmd({}, ["a.test.ts"]) == ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({}, []) == ["python", "-m", "pytest"]
+
+
+def test_detect_test_cmd_node_line_rules(sw):   # 22-1: README의 node 줄은 낱말이 모두 시험 파일일 때만
+    J = ["test.js", "lib/a.test.mjs"]
+    NT = ["node", "--test", "lib/a.test.mjs", "test.js"]
+    for bad in ("node --test --watch", "node --import x.js test.js", "node -r ./x test.js", "node --test --test-reporter-destination=out.txt test.js",
+                "node server.js", "node --test"):
+        assert sw.detect_test_cmd({"README.md": bad + "\n"}, J) == NT, bad
+    assert sw.detect_test_cmd({"README.md": "node --test lib/a.test.mjs\n"}, J) == ["node", "--test", "lib/a.test.mjs"]
+    assert sw.detect_test_cmd({"README.md": "node server.js\n\nnode test.js\n"}, J) == ["node", "test.js"]   # 버리고 다음 줄로
+    assert sw.detect_test_cmd({"README.md": "pytest -q | tee x\n"}, ["test_a.py"]) == ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({"README.md": "npm test && echo done\n"}, ["test_a.py"]) == ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({"README.md": "node 'unclosed\n"}, J) == NT   # shlex 실패 줄은 버림
+
+
+def test_detect_test_cmd_code_extensions_only(sw):   # 22-1: 코드 확장자를 가진 시험 파일만 놓고 「모두 JS」를 본다
+    assert sw.detect_test_cmd({}, ["summary.test.js", "test/fixtures/data.csv", "test/README.md"]) == ["node", "--test", "summary.test.js"]
+    assert sw.detect_test_cmd({}, ["a.test.js", "test/b.ts"]) == ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({}, ["test/data.csv"]) == ["python", "-m", "pytest"]
+
+
+def test_detect_test_cmd_node_named_files_only(sw):   # F4b
+    assert sw.detect_test_cmd({}, ["test/helpers.js", "test/fixtures/server.js", "test/app.test.js"]) == ["node", "--test", "test/app.test.js"]
+    assert sw.detect_test_cmd({}, ["test/app.js", "test/util.js"]) == ["node", "--test", "test/app.js", "test/util.js"]
+
+
+def test_detect_test_cmd_readme_prose_is_not_a_command(sw):   # F5
+    T = ["tests/test_a.py"]
+    PY = ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({"README.md": "pytest is used for the tests\n"}, T) == PY
+    assert sw.detect_test_cmd({"README.md": "pytest 로 돌립니다\n"}, T) == PY
+    assert sw.detect_test_cmd({"README.md": "pytest tests -q\n"}, T) == PY + ["tests", "-q"]
+    assert sw.detect_test_cmd({"README.md": "python -m unittest discover -s tests\n"}, T) == ["python", "-m", "unittest", "discover", "-s", "tests"]
+    assert sw.detect_test_cmd({"README.md": 'python -m pytest -k "not slow"\n'}, T) == PY + ["-k", "not slow"]
+    assert sw.detect_test_cmd({"README.md": "pytest is what we use\npython -m unittest\n"}, T) == ["python", "-m", "unittest"]
+    assert sw.detect_test_cmd({"README.md": "pytest tests/test_a.py\n"}, T) == PY + ["tests/test_a.py"]
+    assert sw.detect_test_cmd({"README.md": "npm test\n"}, T) == ["npm", "test"]
+
+
+def test_detect_test_cmd_nul_line_and_dash_file_names(sw):   # F6
+    assert sw.detect_test_cmd({"README.md": "pytest -q\x00 x\n"}, ["tests/test_a.py"]) == ["python", "-m", "pytest"]
+    assert sw.detect_test_cmd({}, ["--require=x.test.js"]) == ["node", "--test", "./--require=x.test.js"]
+    assert sw.detect_test_cmd({"README.md": "node --test -x.test.js\n"}, ["-x.test.js"]) == ["node", "--test", "./-x.test.js"]
+
+
+def test_tests_a_node_branch(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    calls = fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path / "a", {"app.js": "", "test.js": ""})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0
+    assert calls == [["node", "--test", "test.js"]]                                       # 설치 없음 · venv 없음
+    d = walk_of(R)
+    assert d["시험없음"] is False and d["시험실패"] is False and d["notes"]["cmd"] == "node --test test.js"
+    del calls[:]
+    S, R = a_done(tmp_path / "b", {"test.js": "", "package.json": json.dumps({"name": "x"})})
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    assert calls == [["npm", "install"], ["node", "--test", "test.js"]]
+
+
+def test_tests_a_node_install_failure_is_unknown(sw, tmp_path, monkeypatch):   # 22-1
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    calls = fake_run(sw, monkeypatch, rc_install=1)
+    S, R = a_done(tmp_path, {"test.js": "", "package.json": json.dumps({"name": "x"})})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0
+    d = walk_of(R)
+    assert calls == [["npm", "install"]] and d["시험실패"] is None and "install" in d["notes"]
+
+
+def test_tests_a_cannot_launch_is_unknown(sw, tmp_path, monkeypatch):   # 22-1: 명령을 못 띄우면 traceback 대신 못 잼
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    real = sw.run_cmd
+    def f(argv, cwd=None, env=None, timeout=900):
+        if argv[0] == "git":
+            return real(argv, cwd=cwd, env=env, timeout=timeout)
+        raise FileNotFoundError(argv[0])
+    monkeypatch.setattr(sw, "run_cmd", f)
+    S, R = a_done(tmp_path, {"test.js": ""})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0
+    d = walk_of(R)
+    assert d["시험실패"] is None and d["시험없음"] is False and d["notes"]["cmd_error"] == "명령을 못 띄움 — 못 잼"
+
+
+def test_tests_a_pytest_exit_5_is_unknown(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    calls = fake_run(sw, monkeypatch, rc_test=5)
+    S, R = a_done(tmp_path / "a", {"test_app.py": ""})
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    d = walk_of(R)
+    assert calls[-1][1:] == ["-m", "pytest"] and d["시험실패"] is None and d["notes"]["rc"] == 5 and "pytest" in d["notes"]
+    monkeypatch.undo()
+    fake_run(sw, monkeypatch, rc_test=1)
+    S, R = a_done(tmp_path / "b", {"test_app.py": ""})
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    assert walk_of(R)["시험실패"] is True
+
+
+def test_tests_a_unittest_ran_zero_is_unknown(sw, tmp_path, monkeypatch):   # F3
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    files = {"test_app.py": "", "README.md": "    python -m unittest\n"}
+    calls = fake_run(sw, monkeypatch, rc_test=0, out_test="\n----\nRan 0 tests in 0.000s\n\nOK\n")
+    S, R = a_done(tmp_path / "a", files)
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    d = walk_of(R)
+    assert calls[-1][1:] == ["-m", "unittest"] and d["시험실패"] is None and d["notes"]["rc"] == 0 and "unittest" in d["notes"]
+    monkeypatch.undo()
+    fake_run(sw, monkeypatch, rc_test=5, out_test="")
+    S, R = a_done(tmp_path / "b", files)
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    d = walk_of(R)
+    assert d["시험실패"] is None and d["notes"]["rc"] == 5 and "unittest" in d["notes"]
+    monkeypatch.undo()
+    fake_run(sw, monkeypatch, rc_test=0, out_test="Ran 3 tests in 0.1s\n\nOK\n")   # 돌린 시험이 있으면 평소대로
+    S, R = a_done(tmp_path / "c", files)
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    d = walk_of(R)
+    assert d["시험실패"] is False and "unittest" not in d["notes"]
+    monkeypatch.undo()
+    fake_run(sw, monkeypatch, rc_test=1, out_test="Ran 0 tests in 0.0s\n")   # 끝 값 1이면 못 잼이 아님
+    S, R = a_done(tmp_path / "d", files)
+    sw.cmd_tests_a(cfg, S, R, "r03")
+    assert walk_of(R)["시험실패"] is True
+
+
+def test_tests_a_non_ascii_test_file_name(sw, tmp_path, monkeypatch):   # F2: git이 비ASCII 이름을 따옴표로 내보내도 시험 파일로 센다
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"test_모임.py": ""})
+    assert sw.cmd_tests_a(cfg, S, R, "r03") == 0
+    assert walk_of(R)["시험없음"] is False
 
 
 def test_blank_a_and_task_lookup(sw, tmp_path):
@@ -837,3 +1045,422 @@ def test_drop_hidden_does_not_raise_unexpected_successes_to_ok(sw):
 def test_read_py_deps_keeps_markers_with_inner_quotes(sw):
     t = 'dependencies = [\n    "asgiref>=3.8.1",\n    "tzdata; sys_platform == \'win32\'",\n]\n'
     assert sw.read_py_deps(t) == ["asgiref>=3.8.1", "tzdata; sys_platform == 'win32'"]
+
+
+# ---------- --sub (둘째 자 결과 폴더) ----------
+
+def test_out_dir_and_walk_json_path(sw):
+    assert sw.out_dir("R") == os.path.join("R", "out-done")
+    assert sw.walk_json_path("R", "r03", "ruler2") == os.path.join("R", "out-done", "ruler2", "r03.walk.json")
+    assert sw.walk_json_path("R", "r03") == os.path.join("R", "out-done", "r03.walk.json")
+    for bad in ("../x", "a/b", "Ruler2", "a-b", "", "ruler2\n", "."):
+        with pytest.raises(sw.WalkError):
+            sw.out_dir("R", bad)
+
+
+def test_sub_name_rejected(fake_world):
+    w = fake_world
+    for a in (["tests-a", "--root", str(w["R"]), "r03", "--sub", "../x"], ["tests-a", "--root", str(w["R"]), "r03", "--sub", "A"],
+              ["walk-b", "--root", str(w["R"]), "r11", "--sub", "../x"], ["walk-b", "--root", str(w["R"]), "r11", "--sub", ""],
+              ["walk-b", "--root", str(w["R"]), "r11", "--sub", "BAD-"],
+              ["blank-a", "--root", str(w["R"]), "r03", "--sub", "ruler2"]):
+        rc, out = cli(w, *a)
+        assert rc == 2, (a, out)
+        assert "--sub" in out and "인자 틀림" in out, (a, out)   # F8: 이름 때문에 멈춘 것(다른 까닭의 끝 값 2가 아니라)
+        assert not w["R"].exists(), a
+
+
+def test_sub_name_rejected_when_called_directly(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"test.js": ""})
+    for bad in ("../x", "A", "a-b", "", "ruler2\n"):
+        with pytest.raises(sw.WalkError, match="--sub 이름이 틀림"):   # F8: out_dir의 이름 검사가 막아야 한다(다른 까닭의 오류가 아니라)
+            sw.cmd_tests_a(cfg, S, R, "r03", sub=bad)
+        assert not Path(R).exists()
+
+
+ONE = b'{\n "A1": true,\n "notes": {}\n}\n'
+
+
+def test_tests_a_sub_rewrites_only_sub_file(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"app.js": "", "test.js": ""})
+    top = Path(R) / "out-done" / "r03.walk.json"
+    top.parent.mkdir(parents=True)
+    top.write_bytes(ONE)
+    (Path(R) / "out-done" / "ruler2").mkdir()
+    (Path(R) / "out-done" / "ruler2" / "r03.walk.json").write_bytes(ONE)
+    keep = Path(R) / "walk" / "r03-tests" / "keep.txt"
+    keep.parent.mkdir(parents=True)
+    keep.write_text("1차")
+    assert sw.cmd_tests_a(cfg, S, R, "r03", sub="ruler2") == 0
+    assert top.read_bytes() == ONE and keep.read_text() == "1차"
+    d = walk_of(R, sub="ruler2")
+    assert d["A1"] is True and d["시험없음"] is False and d["시험실패"] is False
+    assert (Path(R) / "walk" / "ruler2-r03-tests" / "w" / "test.js").is_file()
+
+
+def test_tests_a_sub_needs_copied_file(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"test.js": ""})
+    with pytest.raises(sw.WalkError):
+        sw.cmd_tests_a(cfg, S, R, "r03", sub="ruler2")
+    assert not (Path(R) / "out-done" / "ruler2" / "r03.walk.json").exists() and not (Path(R) / "out-done" / "r03.walk.json").exists()
+    assert not (Path(R) / "walk" / "ruler2-r03-tests").exists() and not (Path(R) / "walk" / "r03-tests").exists()
+
+
+def test_tests_a_sub_clears_old_step_notes(sw, tmp_path, monkeypatch):   # 22-2: 복사해 온 1차 메모가 섞이지 않게
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"test.js": ""})
+    f = Path(R) / "out-done" / "ruler2" / "r03.walk.json"
+    f.parent.mkdir(parents=True)
+    f.write_text(json.dumps({"A1": True, "notes": {"install": "옛", "pytest": "옛", "unittest": "옛", "rc": 9, "cmd_error": "옛", "cmd": "옛", "keep": "손 메모"}}), encoding="utf-8")
+    assert sw.cmd_tests_a(cfg, S, R, "r03", sub="ruler2") == 0
+    n = walk_of(R, sub="ruler2")["notes"]
+    assert "install" not in n and "pytest" not in n and "cmd_error" not in n and "unittest" not in n and n["rc"] == 0
+    assert n["cmd"] == "node --test test.js" and n["keep"] == "손 메모"
+
+
+def test_tests_a_sub_clone_failure_leaves_sub_file_alone(sw, tmp_path, monkeypatch):   # F7: clone이 실패하면 sub 파일의 옛 notes를 지우지 않는다
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"test.js": ""})
+    f = Path(R) / "out-done" / "ruler2" / "r03.walk.json"
+    f.parent.mkdir(parents=True)
+    f.write_text(json.dumps({"A1": True, "notes": {"install": "옛", "cmd": "옛"}}), encoding="utf-8")
+    before = f.read_bytes()
+    def boom(src, w):
+        raise sw.WalkError("clone 실패")
+    monkeypatch.setattr(sw, "clone_done", boom)
+    with pytest.raises(sw.WalkError):
+        sw.cmd_tests_a(cfg, S, R, "r03", sub="ruler2")
+    assert f.read_bytes() == before
+
+
+def b_world(sw, tmp_path, monkeypatch):
+    S, R = tmp_path / "S", tmp_path / "R"
+    w = S / "done" / "r11" / "w"
+    w.mkdir(parents=True)
+    git(w, "init", "-q")
+    (w / "cps.py").write_text("import sys\nsys.exit(0)\n")
+    git(w, "add", "-A")
+    git(w, "commit", "-q", "-m", "end")
+    (R / "bases").mkdir(parents=True)
+    (R / "bases" / "b.tar").write_bytes(b"")
+    (R / "walkkit" / "library").mkdir(parents=True)
+    (R / "walkkit" / "library" / "metadata.db").write_bytes(b"zz")
+    c = sqlite3.connect(str(R / "walkkit" / "app.db"))
+    c.execute("create table settings(config_port integer, config_calibre_dir text)")
+    c.execute("insert into settings values (0, '')")
+    c.commit()
+    c.close()
+    vb = tmp_path / "venv-b" / "bin"
+    vb.mkdir(parents=True)
+    os.symlink(sys.executable, vb / "python")
+    monkeypatch.setenv("STAGE_VENV_B", str(tmp_path / "venv-b"))
+    monkeypatch.setattr(sw, "free_port", lambda port: True)
+    monkeypatch.setattr(sw, "wait_up", lambda url, secs: False)
+    return str(S), str(R)
+
+
+def test_walk_b_sub_writes_only_sub_dir(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    top = Path(R) / "out-done" / "r11.walk.json"
+    top.parent.mkdir(parents=True)
+    top.write_bytes(ONE)
+    keep = Path(R) / "walk" / "r11" / "keep.txt"
+    keep.parent.mkdir(parents=True)
+    keep.write_text("1차")
+    assert sw.cmd_walk_b(cfg, S, R, "r11", None, sub="ruler2") == 0
+    assert top.read_bytes() == ONE and keep.read_text() == "1차"
+    d = walk_of(R, "r11", "ruler2")
+    assert [k for k in d if k != "notes"] == cfg["tasks"]["b2"]["scenes"] and not any(d[k] for k in cfg["tasks"]["b2"]["scenes"])
+    assert "up" in d["notes"] and (Path(R) / "walk" / "ruler2-r11" / "w" / "cps.py").is_file()
+
+
+def test_walk_b_without_sub_writes_out_done_as_before(sw, tmp_path, monkeypatch):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    assert sw.cmd_walk_b(cfg, S, R, "r11", None) == 0
+    assert (Path(R) / "out-done" / "r11.walk.json").is_file() and not (Path(R) / "out-done" / "ruler2").exists()
+    assert (Path(R) / "walk" / "r11" / "w").is_dir()
+
+
+def test_first_ruler_frozen_when_ruler2_dir_exists_tests_a(sw, tmp_path, monkeypatch):   # 22-2 얼림 막이
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"test.js": ""})
+    top = Path(R) / "out-done" / "r03.walk.json"
+    top.parent.mkdir(parents=True)
+    top.write_bytes(ONE)
+    (Path(R) / "out-done" / "ruler2").mkdir()
+    with pytest.raises(sw.WalkError) as e:
+        sw.cmd_tests_a(cfg, S, R, "r03")
+    assert "얼렸다" in str(e.value) and "--sub ruler2" in str(e.value)
+    assert top.read_bytes() == ONE and not (Path(R) / "walk").exists()
+    # 폴더가 없으면 지금처럼 돈다
+    S2, R2 = a_done(tmp_path / "n", {"test.js": ""})
+    assert sw.cmd_tests_a(cfg, S2, R2, "r03") == 0 and walk_of(R2)["시험없음"] is False
+    # x 실행은 폴더가 있어도 --sub 없이 돈다
+    S3, R3 = a_done(tmp_path / "x", {"test.js": ""}, run="x01")
+    (Path(R3) / "out-done" / "ruler2").mkdir(parents=True)
+    assert sw.cmd_tests_a(cfg, S3, R3, "x01") == 0 and walk_of(R3, "x01")["시험없음"] is False
+
+
+def test_first_ruler_frozen_when_ruler2_dir_exists_walk_b(sw, tmp_path, monkeypatch):   # 22-2 얼림 막이
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    top = Path(R) / "out-done" / "r11.walk.json"
+    top.parent.mkdir(parents=True)
+    top.write_bytes(ONE)
+    (Path(R) / "out-done" / "ruler2").mkdir()
+    with pytest.raises(sw.WalkError) as e:
+        sw.cmd_walk_b(cfg, S, R, "r11", None)
+    assert "얼렸다" in str(e.value)
+    assert top.read_bytes() == ONE and not (Path(R) / "walk").exists()
+    assert sw.cmd_walk_b(cfg, S, R, "r11", None, sub="ruler2") == 0          # --sub 로는 돈다
+
+
+def test_cli_tests_a_sub_and_freeze_exit_codes(fake_world):
+    w = fake_world
+    done = w["S"] / "done" / "r03" / "w"
+    done.mkdir(parents=True)
+    git(done, "init", "-q")
+    (done / "app.py").write_text("print(1)\n")
+    git(done, "add", "-A")
+    git(done, "commit", "-q", "-m", "end")
+    top = w["R"] / "out-done" / "r03.walk.json"
+    top.parent.mkdir(parents=True)
+    top.write_bytes(ONE)
+    sub = w["R"] / "out-done" / "ruler2"
+    rc, out = cli(w, "tests-a", "--root", str(w["R"]), "r03", "--sub", "ruler2")     # 복사해 둔 파일 없음
+    assert rc == 2 and not (w["R"] / "walk" / "ruler2-r03-tests").exists(), out
+    sub.mkdir()
+    (sub / "r03.walk.json").write_bytes(ONE)
+    rc, out = cli(w, "tests-a", "--root", str(w["R"]), "r03", "--sub", "ruler2")
+    assert rc == 0, out
+    assert top.read_bytes() == ONE and json.loads((sub / "r03.walk.json").read_text(encoding="utf-8"))["시험없음"] is True
+    rc, out = cli(w, "tests-a", "--root", str(w["R"]), "r03")                         # 얼림 막이
+    assert rc == 2 and top.read_bytes() == ONE, out
+    rc, out = cli(w, "walk-b", "--root", str(w["R"]), "r11", "--sub", "BAD-")
+    assert rc == 2, out
+
+
+# ---------- run_bytes — 끝난 뒤 남는 프로세스 ----------
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"      # 좀비는 이미 죽은 것
+    except OSError:
+        return False
+
+
+def test_run_bytes_kills_leftover_group_after_normal_exit(sw, tmp_path):
+    code = ("import subprocess, sys\n"
+            "p = subprocess.Popen(['sleep', '300'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "print(p.pid, flush=True)\n")
+    rc, out = sw.run_bytes([sys.executable, "-I", "-B", "-c", code], cwd=str(tmp_path), env=dict(GIT_ENV), timeout=30)
+    pid = int(out.decode().split()[0])
+    try:
+        assert rc == 0
+        for _ in range(40):
+            if not _alive(pid):
+                break
+            time.sleep(0.05)
+        assert not _alive(pid)
+    finally:
+        if _alive(pid):
+            os.kill(pid, 9)
+
+
+# ---------- b2 장면 Y1~Y4 ----------
+
+ROW = ('<div class="row"><div class="col-xs-2 col-sm-2 col-md-1" align="left"><span class="badge">{n}</span></div>'
+       '<div class="col-xs-10 col-sm-10 col-md-11"><a id="list_{i}" href="{h}">{t}</a></div></div>\n')
+NAV = '<ul><li id="nav_year"><a href="/year?data=x">Years</a></li><li><a href="/publisher">Publishers</a></li></ul>\n'
+YROWS = [("1987", 1), ("1999", 2), ("2005", 2), ("None", 1)]
+COUNTS = {"1999": 2, "2005": 2, "1987": 1}
+
+
+def year_list(rows=YROWS, nav=NAV, tail=""):
+    return nav + "".join(ROW.format(n=n, i=i, h="/year/stored/%s" % y, t=y) for i, (y, n) in enumerate(rows)) + tail
+
+
+def test_year_counts_ok_shapes(sw):
+    after = NAV + "".join('<li><a href="/year/stored/%s">%s</a> <span class="badge">%d</span></li>\n' % (y, y, n) for y, n in YROWS)
+    inside = NAV + "".join('<li><a href="/year/stored/%s">%s (%d)</a></li>\n' % (y, y, n) for y, n in YROWS)
+    wrong = year_list([("1987", 1), ("1999", 3), ("2005", 2), ("None", 1)])
+    mixed = NAV + '<span>2</span><a href="/y/1999">1999</a> <a href="/y/2005">2005</a><span>2</span> <span>1</span><a href="/y/1987">1987</a>'
+    noise = year_list(nav=NAV.replace("</ul>", '<li><a href="/book/9">Notes 1999</a></li></ul>'), tail='<a href="/year?page=2">2</a>')
+    assert sw.year_counts_ok(year_list(), COUNTS)        # 책 수가 링크 앞(바탕 틀)
+    assert sw.year_counts_ok(after, COUNTS)              # 링크 뒤
+    assert sw.year_counts_ok(inside, COUNTS)             # 링크 글자 안
+    assert sw.year_counts_ok(noise, COUNTS)              # 연도가 다른 링크에도 듦 · 쪽 번호 링크
+    assert not sw.year_counts_ok(wrong, COUNTS)          # 틀린 수
+    assert not sw.year_counts_ok(mixed, COUNTS)          # 방향이 섞임
+    assert not sw.year_counts_ok("<p>1999 2 2005 2 1987 1</p>", COUNTS)   # 링크가 아님
+
+
+def test_year_counts_ok_after_only_when_no_number_before_first(sw):   # F1
+    B = '<span class="badge">%d</span><a href="/year/%s">%s</a>'
+    def front(rows):
+        return "".join(B % (n, y, y) for y, n in rows)
+    asc = front([("1987", 7), ("1999", 1), ("2005", 2), ("None", 2)])     # 수가 링크 앞 · 제 수가 다 틀림 → 다음 줄의 수를 읽으면 안 됨
+    assert asc == ('<span class="badge">7</span><a href="/year/1987">1987</a><span class="badge">1</span><a href="/year/1999">1999</a>'
+                   '<span class="badge">2</span><a href="/year/2005">2005</a><span class="badge">2</span><a href="/year/None">None</a>')
+    assert not sw.year_counts_ok(asc, COUNTS)
+    assert not sw.year_counts_ok(front([("2005", 5), ("1999", 2), ("1987", 2), ("None", 1)]), COUNTS)
+    assert sw.year_counts_ok(front([("1987", 1), ("1999", 2), ("2005", 2), ("None", 1)]), COUNTS)
+    back = '<a href="/y/1987">1987</a> <span>1</span><a href="/y/1999">1999</a> <span>2</span><a href="/y/2005">2005</a> <span>2</span>'
+    assert sw.year_counts_ok(back, COUNTS)                                # 맨 앞 링크 앞에 수가 없으면 뒤 방향
+    head = '<h1>Years</h1><p>4 years</p><ul>'                             # G1: 목록 앞 머리글의 수는 (다)를 끄지 않는다(앞 글이 수로 끝나지 않음)
+    tail = '<li><a href="/year/%s">%s</a> <span class="badge">%d</span></li>'
+    lst = lambda rows: head + "".join(tail % (y, y, n) for y, n in rows) + "</ul>"
+    assert sw.year_counts_ok(lst([("1987", 1), ("1999", 2), ("2005", 2)]), COUNTS)
+    assert not sw.year_counts_ok(lst([("1987", 1), ("1999", 1), ("2005", 2)]), COUNTS)
+    OK3, BAD3 = [("1987", 1), ("1999", 2), ("2005", 2)], [("1987", 1), ("1999", 1), ("2005", 2)]
+    assert sw.year_counts_ok(lst(OK3).replace(head, "<p>1987-2005</p><ul>"), COUNTS)   # H1: 목록 앞 글이 수로 끝나도 수-뒤 화면은 맞음
+    btn = '<div class="btn">All</div><div class="btn">1</div><div class="btn">2</div><ul>'
+    assert sw.year_counts_ok(lst(OK3).replace(head, btn), COUNTS)
+    assert not sw.year_counts_ok(lst(BAD3).replace(head, btn), COUNTS)
+    wrapped = lambda fmt, nums: "".join('<div class="row"><span class="badge">%s</span><a href="/year/%s">%s</a></div>' % (fmt % n, y, y)
+                                        for y, n in zip(("1987", "1999", "2005", "None"), nums))
+    for fmt in ("%d books", "(%d)"):   # 수-앞 · 줄 감쌈 · 글자 붙음: 한 칸 밀린 수는 안 됨
+        assert not sw.year_counts_ok(wrapped(fmt, (7, 1, 2, 2)), COUNTS), fmt
+        assert sw.year_counts_ok(wrapped(fmt, (1, 2, 2, 1)), COUNTS), fmt
+    colrow = lambda nums: '<div class="btn">1</div><div class="btn">2</div>' + "".join(
+        '<div class="row"><div class="col"><span class="badge">%d</span></div><div class="col"><a href="/year/%s">%s</a></div></div>' % (n, y, y)
+        for y, n in zip(("1987", "1999", "2005", "None"), nums))
+    assert sw.year_counts_ok(colrow((1, 2, 2, 1)), COUNTS)
+    assert not sw.year_counts_ok(colrow((7, 1, 2, 2)), COUNTS)
+    mirror = ('<p>page 2</p><ul><li><a href="/year/2005">2005</a> <span>2</span></li><li><a href="/year/1999">1999</a> <span>1</span></li>'
+              '<li><a href="/year/1987">1987</a> <span>9</span></li></ul>')
+    assert not sw.year_counts_ok(mirror, COUNTS)                          # (나) 쪽 대칭
+    YS = ("1987", "1999", "2005", "None")
+    def forms(row):   # J1: 배지와 링크 사이에 빈 태그·곧바로 닫히는 짝이 끼어도 같은 줄의 수를 읽는다
+        return lambda nums: "<ul>" + "".join(row(n, y) for y, n in zip(YS, nums)) + "</ul>"
+    front_forms = [
+        forms(lambda n, y: '<li><span class="badge">%d</span> <i class="fa fa-calendar"></i><img src="/i.png"> <a href="/year/%s">%s</a></li>' % (n, y, y)),
+        forms(lambda n, y: '<li><span class="badge">%d</span><br><span class="glyphicon glyphicon-book"></span><a href="/year/%s">%s</a></li>' % (n, y, y)),
+        forms(lambda n, y: '<li><span class="badge">%d</span> <span class="lbl">books</span> <a href="/year/%s">%s</a></li>' % (n, y, y)),
+    ]
+    for f in front_forms:
+        assert sw.year_counts_ok(f((1, 2, 2, 1)), COUNTS), f((1, 2, 2, 1))
+        assert not sw.year_counts_ok(f((7, 1, 2, 2)), COUNTS), f((7, 1, 2, 2))
+    back_form = forms(lambda n, y: '<li><a href="/year/%s">%s</a><br><i class="fa fa-book"></i> <span class="badge">%d</span></li>' % (y, y, n))
+    assert sw.year_counts_ok(back_form((1, 2, 2, 1)), COUNTS)
+    assert not sw.year_counts_ok(back_form((1, 1, 2, 1)), COUNTS)
+    mixed_a = ('<ul><li><a href="/year/1987">1987</a> <span>1</span></li><li><a href="/year/1999">1999</a></li>'
+               '<li><span>2</span><a href="/year/2005">2005</a> <span>2</span></li></ul>')
+    mixed_b = ('<ul><li><span>1</span><a href="/year/1987">1987</a></li><li><span>2</span><a href="/year/1999">1999</a> <span>2</span></li>'
+               '<li><a href="/year/2005">2005</a></li></ul>')
+    assert sw.year_counts_ok(mixed_a, COUNTS)                             # 표가 섞이면 못 가림 → 두 방향을 다 보고 뒤 방향으로 맞음
+    tbl = lambda nums: "<table>" + "".join("<tr><td><a href=\"/year/%s\">%s</a><td>%d" % (y, y, n) for y, n in zip(YS, nums)) + "</table>"   # K1: 닫는 태그 생략
+    assert sw.year_counts_ok(tbl((1, 2, 2, 1)), COUNTS)
+    assert not sw.year_counts_ok(tbl((1, 1, 2, 1)), COUNTS)
+    dl = "<dl>" + "".join('<dt><a href="/year/%s">%s</a><dd>%d books' % (y, y, n) for y, n in zip(YS, (1, 2, 2, 1))) + "</dl>"
+    assert sw.year_counts_ok(dl, COUNTS)
+    ul = "<ul>" + "".join('<li>(%d) <a href="/year/%s">%s</a>' % (n, y, y) for y, n in zip(YS, (1, 2, 2, 1))) + "</ul>"
+    assert sw.year_counts_ok(ul, COUNTS)
+    assert sw.year_counts_ok(mixed_b, COUNTS)                             # 반대로 섞인 꼴: 앞 방향으로 맞음(표 하나만 받는 코드는 둘 중 하나에서 떨어짐)
+
+
+def test_gap_side(sw):   # H1: 이웃한 두 링크 사이의 수가 어느 링크 것인가
+    side = lambda b: sw.gap_side(b, sw.link_spans(b), 0)
+    li = '<ul><li><a href="/year/1987">1987</a> <span class="badge">1</span></li><li><a href="/year/1999">1999</a> <span class="badge">2</span></li></ul>'
+    assert side(li) == "after"
+    rc = ('<div class="row"><div class="col"><span class="badge">1</span></div><div class="col"><a href="/year/1987">1987</a></div></div>'
+          '<div class="row"><div class="col"><span class="badge">2</span></div><div class="col"><a href="/year/1999">1999</a></div></div>')
+    sp = sw.link_spans(rc)
+    assert sw.gap_side(rc, sp, 0) == "before"
+    assert side('<a href="/y/1987">1987</a> <span>1</span><a href="/y/1999">1999</a>') is None             # 납작해 못 가림
+    assert side('<a href="/y/1987">1987</a><span>1</span><span>2</span><a href="/y/1999">1999</a>') is None  # 수 덩이가 둘
+    assert side('<a href="/y/1987">1987</a><span>&#160;</span><a href="/y/1999">1999</a>') is None           # 글자 참조를 푼 뒤 숫자가 없음
+    icons = ('<ul><li><span class="badge">1</span> <i class="fa fa-calendar"></i><img src="/i.png"> <a href="/year/1987">1987</a></li>'
+             '<li><span class="badge">2</span> <i class="fa fa-calendar"></i><img src="/i.png"> <a href="/year/1999">1999</a></li></ul>')
+    assert side(icons) == "before"
+    assert side('<li><a href="/year/1987">1987</a><br><i class="fa fa-book"></i> <span class="badge">1</span></li><li><a href="/year/1999">1999</a></li>') == "after"
+    assert side('<tr><td><a href="/y/1987">1987</a></td><td>1</td></tr><tr><td><a href="/y/1999">1999</a></td><td>2</td></tr>') == "after"
+    assert side('<a href="/y/1987">1987</a><!-- 3 --><a href="/y/1999">1999</a>') is None                   # 주석은 글 덩이가 아님
+    assert side('<table><tr><td><a href="/year/1987">1987</a><td>1<tr><td><a href="/year/1999">1999</a><td>2</table>') is None   # K1: 닫는 태그 생략
+    assert side('<dl><dt><a href="/year/1987">1987</a><dd>1 books<dt><a href="/year/1999">1999</a><dd>2 books</dl>') is None
+    assert side('<ul><li><a href="/y/1987">1987</a> (1)<li><a href="/y/1999">1999</a> (2)</ul>') is None
+    mixed = ('<ul><li><a href="/year/1987">1987</a> <span>1</span></li><li><a href="/year/1999">1999</a></li>'
+             '<li><span>2</span><a href="/year/2005">2005</a> <span>2</span></li></ul>')
+    ms = sw.link_spans(mixed)
+    assert [sw.gap_side(mixed, ms, 0), sw.gap_side(mixed, ms, 1)] == ["after", "before"]
+
+
+def test_tag_step(sw):   # J1
+    assert sw._tag_step('<div class="a">') == 1 and sw._tag_step("</div>") == -1
+    for t in ("<br>", "<br/>", '<img src="x">', "<span/>", "<!-- x -->", "<!DOCTYPE html>"):
+        assert sw._tag_step(t) == 0, t
+
+
+def test_cut_random(sw):
+    band = '<div class="discover random-books"><h2 class="random-books">D</h2><a href="/book/3">Winter Letter</a></div>'
+    main = '<div class="discover load-more"><a href="/book/1">Sea Song</a></div>'
+    assert "Winter Letter" not in sw.cut_random(band + main) and "Sea Song" in sw.cut_random(band + main)
+    assert sw.cut_random(main) == main                   # 띠가 없음
+    assert sw.cut_random(main + band) == main + band     # 띠 뒤에 덩이가 없음 — 안 자름
+
+
+def test_cut_random_word_order_and_data_class(sw):      # 22-4
+    main = '<div class="discover load-more"><a href="/book/1">Sea Song</a></div>'
+    flipped = '<div class="random-books discover"><a href="/book/3">Winter Letter</a></div>'
+    assert "Winter Letter" not in sw.cut_random(flipped + main) and "Sea Song" in sw.cut_random(flipped + main)
+    data = '<div data-class="discover random-books"><a href="/book/3">Winter Letter</a></div>'
+    assert sw.cut_random(data + main) == data + main     # data-class= 는 class= 가 아님
+    only_rb = '<div class="random-books"><a href="/book/3">Winter Letter</a></div>'
+    assert sw.cut_random(only_rb + main) == only_rb + main   # discover 낱말이 없으면 띠가 아님
+
+
+def test_url_path(sw):
+    assert sw.url_path("/year?data=x") == "/year" and sw.url_path("/year#top") == "/year"
+    assert sw.url_path("http://127.0.0.1:1/year/?a=b") == "/year/" and sw.url_path("/year") == "/year"
+
+
+class PageCli:
+    def __init__(self, pages):
+        self.pages = pages
+    def get(self, path):
+        return (200, {}, self.pages[path]) if path in self.pages else (404, {}, "")
+
+
+def books(*titles, band=("Winter Letter",)):
+    b = '<div class="discover random-books">' + "".join("<a href='/b'>%s</a>" % t for t in band) + "</div>"
+    return b + '<div class="discover load-more">' + "".join("<a href='/b'>%s</a>" % t for t in titles) + "</div>"
+
+
+def test_y_scenes_with_badge_before_and_random_band(sw):
+    pages = {"/year": year_list(), "/": NAV,
+             "/year/stored/1999": books("Sea Song", "Mountain Path"), "/year/stored/2005": books("Winter Letter", "Small House", band=("Old Map",)),
+             "/year/stored/1987": books("Old Map"), "/year/stored/None": books("No Date")}
+    res, notes = {}, {}
+    sw.y_scenes(PageCli(pages), res, notes)
+    assert res == {"Y1": True, "Y2": True, "Y3": True, "Y4": True}, notes
+    pages["/"] = '<a href="/yearly">x</a>'
+    pages["/year/stored/1987"] = books("Old Map", "Sea Song")
+    res = {}
+    sw.y_scenes(PageCli(pages), res, {})
+    assert res["Y2"] is False and res["Y4"] is False
+
+
+def test_y2_prefers_path_ending_in_year_over_text(sw):   # 22-4: 메뉴에 연도가 든 다른 링크가 먼저 있어도 연도 목록 링크를 따라감
+    nav = NAV.replace("</ul>", '<li><a href="/book/9">Notes 1999</a></li></ul>')
+    pages = {"/year": year_list(nav=nav), "/": nav, "/book/9": "<p>No Date Sea Song</p>",
+             "/year/stored/1999": books("Sea Song", "Mountain Path"), "/year/stored/2005": books("Winter Letter", "Small House", band=("Old Map",)),
+             "/year/stored/1987": books("Old Map"), "/year/stored/None": books("No Date")}
+    res, notes = {}, {}
+    sw.y_scenes(PageCli(pages), res, notes)
+    assert res["Y2"] is True and res["Y1"] is True, notes

@@ -911,6 +911,7 @@ def test_flow_rerun_needs_money_rerun_key_and_own_ledger(world, tmp_path):
     for n in ("stage-prompts.txt", "stage-replies.txt"):
         shutil.copy(M / n, cfgdir / n)
     cfg = json.loads((M / "stage" / "tasks.json").read_text(encoding="utf-8"))
+    cfg.pop("money_rerun", None)
     cfg["rerun"] = [["x01", "a1", "q"]]
     tj = cfgdir / "stage" / "tasks.json"
     tj.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")

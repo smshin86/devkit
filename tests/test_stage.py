@@ -167,10 +167,12 @@ def test_prompts_have_no_void_words(tasks):
 
 def test_tasks_json_keys_and_hashes(tasks):
     for k in "stage work kit arms money order zero rerun void noise kitfiles peek peek_run peek_kit peek_scan ports walk " \
-             "secret testfiles classify seed tasks kinds pkg_hosts".split():
+             "secret testfiles classify seed tasks kinds pkg_hosts money_rerun".split():
         assert k in tasks, k
     assert "peek_up" not in tasks                              # 글자 "../../" 검사는 없앴다(길을 풀어 본다)
     assert tasks["money"]["margin"] == "0.50"
+    assert tasks["money_rerun"] == {"need": "1.00", "alarm": "1.50", "stop": "4.50"}
+    assert [list(r[:3]) for r in tasks["rerun"]] == [["x01", "a1", "p"], ["x02", "a2", "p"], ["x03", "b1", "p"], ["x04", "b2", "p"]]
     assert 143 in tasks["void_exits"] and 17 in tasks["void_exits"]
     assert tasks["sealed_dirs"] == ["sealed", "src-b", "src-c", "bases", "walkkit", "walk", "venv-b", "venv-c", "done", "out-done"]
     assert tasks["peek_dash"] == ["-zzz-w-run-", "-mnt-e-claude-dev"]
@@ -226,6 +228,25 @@ def test_hidden_md_sections_and_scene_lines():
     for tag in ("A1 A2 A3 A4 A5 P1 P2 P3 P4 P5 S1 S2 S3 S4 S5 Y1 Y2 Y3 Y4 E1 E2 E3 E4 E5 E6 E7").split():
         n = sum(1 for ln in lines if ("- %s " % tag) in ln and ln.lstrip().startswith("- %s " % tag))
         assert n == 1, tag
+
+
+def test_hidden_md_ruler2_marks():
+    t = HIDDEN.read_text(encoding="utf-8")
+    assert re.findall(r"^## .+$", t, re.M)[-1] == "## 고침 기록"
+    sec = lambda h: t.split("\n" + h + "\n", 1)[1].split("\n## ", 1)[0]
+    for h in ("## a1", "## a2", "## b1", "## b2", "## 세는 법", "## 걸어 보기 규칙"):
+        assert "(둘째 자)" in sec(h), h
+    for s in ("## a1", "## a2"):
+        for w in ("`test.mjs`", "`*.spec.cjs`", "`test/`", "`latest.js`", "no test specified", "`node --test", "끝 값 5",
+                  "합의 목록", "`합의로뺀것`", "포트 하나와 저장 자리 하나", "입력을 너그럽게 받기", "첫 턴 마지막 답글 전체", "코드 확장자"):
+            assert w in sec(s), (s, w)
+        assert "tasks.json" not in sec(s)
+    for s in ("## b1", "## b2"):
+        for w in ("나쁜 방식마다 1건", "세 줄 넘는 덩이", "도우미 안 씀", "한 벌 더한 것", "그 자리에서 고쳐 쓴 것", "있던 목록 하나가 가진 줄 수까지"):
+            assert w in sec(s), (s, w)
+    assert "random-books" in sec("## b2") and "물음표" in sec("## b2") and "`if` 사슬" in sec("## b2") and "도우미마다 1" in sec("## b2")
+    assert "첫 턴 마지막 답글" in sec("## 걸어 보기 규칙")
+    assert "`C`" in sec("## 세는 법") and "c6ad1d9" in sec("## 고침 기록") and "x 못 잼" in sec("## 고침 기록")
 
 
 def test_bad_regexes_match_marked_lines(st, tasks):
@@ -299,6 +320,7 @@ def test_order_cli(tmp_path, tasks):
     assert run("order", TASKS, "z01", "z0", "p")[0] == 0
     assert run("order", TASKS, "z01", "z0", "q")[0] == 2
     assert run("order", TASKS, "x01", "c1", "p")[0] == 2
+    assert run("order", TASKS, "x01", "a1", "p")[0] == 0
     t2 = dict(tasks, rerun=[["x01", "c1", "p"]])
     f = tmp_path / "tasks.json"
     f.write_text(json.dumps(t2), encoding="utf-8")
@@ -319,7 +341,9 @@ def test_cfg_cli():
     rc, out = run("cfg", TASKS, "money.alert")
     assert rc == 0 and out.strip() == "12.00"
     assert run("cfg", TASKS, "money.nope")[0] == 2
-    assert run("cfg", TASKS, "money_rerun.need")[0] == 2
+    rc, out = run("cfg", TASKS, "money_rerun.need")
+    assert rc == 0 and out.strip() == "1.00"
+    assert run("cfg", TASKS, "money_rerun.nope")[0] == 2
     rc, out = run("cfg", TASKS, "tasks.b1.line")
     assert rc == 0 and out.strip() == "3"
 
