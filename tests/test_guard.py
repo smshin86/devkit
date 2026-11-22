@@ -630,3 +630,50 @@ def test_write_over_in_readme():
     line = next(x for x in section() if "**잘못 걸리는 것:**" in x)
     for tag in {t for t, _, _ in WRITE_OVER}:
         assert tag in line, tag
+
+
+# 새 실행 방식(Code Mode)에서는 폴더 안 명령이 `cd '폴더' && 명령` 꼴로 온다 — 평소와 같게 판정한다
+CD_FORMS = [  # (명령, judge 결과)
+ ("grep -n password settings.py", ("deny", "")),
+ ("cd 'app' && grep -n password settings.py", ("deny", "")),
+ ('cd "my app" && grep -rn secret .', ("deny", "")),
+ ("cat .env", ("ask", ".env")),
+ ("cd 'app' && cat .env", ("ask", ".env")),
+ ("cd 'config' && cat credentials.json", ("ask", "credentials.json")),
+ ("cd 'app'; cat .env", ("ask", ".env")),
+ ("(cd 'app' && cat .env)", ("ask", ".env")),
+ ("pushd app >/dev/null && cat .env", ("ask", ".env")),
+ ("cd 'app' && git push", None),
+ ("cd 'app' && grep -rl password .", None),
+ ("cd 'app' && python3 -m pytest -q", None),
+ ("cd '/p/app' && cat .env", ("ask", ".env")),
+ ("cd 'it'\\''s' && cat .env", ("ask", ".env")),
+]
+CD_SAME = [  # (폴더에 들어가는 꼴, 같은 명령의 맨 꼴)
+ ("cd 'app' && grep -n password settings.py", "grep -n password settings.py"),
+ ('cd "my app" && grep -rn secret .', "grep -rn secret ."),
+ ("cd 'app' && cat .env", "cat .env"), ("cd 'config' && cat credentials.json", "cat credentials.json"),
+ ("cd 'app'; cat .env", "cat .env"), ("(cd 'app' && cat .env)", "cat .env"),
+ ("pushd app >/dev/null && cat .env", "cat .env"), ("cd 'app' && git push", "git push"),
+ ("cd 'app' && grep -rl password .", "grep -rl password ."), ("cd 'app' && python3 -m pytest -q", "python3 -m pytest -q"),
+ ("cd '/p/app' && cat .env", "cat .env"), ("cd 'it'\\''s' && cat .env", "cat .env"),
+]
+
+
+@pytest.mark.parametrize("cmd,want", CD_FORMS, ids=[str(i) for i in range(len(CD_FORMS))])
+def test_cd_forms(cmd, want):
+    assert G.judge("Bash", {"command": cmd}) == want
+
+
+@pytest.mark.parametrize("cd,bare", CD_SAME, ids=[str(i) for i in range(len(CD_SAME))])
+def test_cd_same_as_bare(cd, bare):
+    assert G.judge("Bash", {"command": cd}) == G.judge("Bash", {"command": bare})
+
+
+def test_cd_form_hook_same(tmp_path):
+    for i, loud in ((0, True), (2, True), (7, False)):
+        cd, bare = CD_SAME[i]
+        a = run(payload("Bash", {"command": cd}, tmp_path), tmp_path / "home", tmp_path)
+        b = run(payload("Bash", {"command": bare}, tmp_path), tmp_path / "home", tmp_path)
+        assert (a.returncode, a.stdout, a.stderr) == (b.returncode, b.stdout, b.stderr)
+        assert bool(a.stdout) == loud

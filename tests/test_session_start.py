@@ -253,7 +253,7 @@ def test_hooks_json():
     assert hook == HOOK
     (pre,) = data["hooks"]["PreToolUse"]; assert set(pre) == {"matcher", "hooks"} and pre["matcher"] == "Bash|Read|Grep|Edit|Write"
     (guard,) = pre["hooks"]; assert guard == GUARD_HOOK
-    (post,) = data["hooks"]["PostToolUse"]; assert set(post) == {"matcher", "hooks"} and post["matcher"] == pre["matcher"]
+    (post,) = data["hooks"]["PostToolUse"]; assert set(post) == {"matcher", "hooks"} and post["matcher"] == "Bash|Read|Grep|Edit|Write|REPL"
     (mask,) = post["hooks"]; assert mask == MASK_HOOK
     for bad in ("||", "&&", ";", "`", "$("): assert bad not in raw
 

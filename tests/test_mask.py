@@ -204,6 +204,7 @@ MASK_GAPS = [
 # 도구 입력으로 보는 것 (꼬리표, 도구, 입력, 결과 글)
 MASK_GAPS_TOOLS = [
     ("시험 파일", "Read", {"file_path": "/p/tests/test_db.py"}, 'password = "%s"' % F),
+    ("글 속에 한 번 더 감싼 JSON", "REPL", {"code": "x"}, json.dumps({"tests": "ok\nDB_PASSWORD=%s\n" % F})),
 ]
 # 돌려서 다시 만들 수 없는 것 — README에 적혀 있는지만 본다
 MASK_GAPS_TEXT = ["0이 아닌 값으로 끝난 명령", "결과를 바꿔 찍는 명령"]
@@ -276,6 +277,11 @@ KF = [
     (("Bash", {"command": "cat tests/conftest.py .env"}, "/p"), (True, False)),
     (("Bash", {"command": "pytest tests/test_db.py -x; printenv"}, "/p"), (True, False)),
     (("Bash", {"command": "docker compose -f tests/docker-compose.yml config"}, "/p"), (True, True)),
+    # 새 실행 방식(REPL) — 명령처럼 다룬다: 이름 가림은 끄지 않고, 코드 글의 파일 이름이 다 설정 파일이면 설정 꼴로 본다
+    (("REPL", {"code": "await $`cat config/app.yml`.text()"}, "/p"), (True, True)),
+    (("REPL", {"code": "await $`cat tests/test_a.py`.text()"}, "/p"), (True, False)),
+    (("REPL", {"code": "x"}, "/p"), (True, False)),
+    (("REPL", 5, "/p"), (True, False)),
 ]
 
 # 느려지는 입력 — 각각 8줄(30 KB 안팎)
@@ -372,6 +378,34 @@ WITHOUT_VALUE = [
     _read("import os\nPORT = 8080\n"), _bash("PORT = 8080\n"), _grep("a.py:1:PORT = 8080", "numLines"),
     _grep("a.py:1:PORT = 8080", "numMatches"), _edit("A = 1\nC = 3\n"),
     ("Write", {"file_path": "/p/a.py", "content": "A = 1\n"}, {"filePath": "/p/a.py", "type": "create"}),
+]
+
+CODE = "await $`cat app/settings.py`.text()"
+PIC = {"type": "base64", "media_type": "image/png", "data": TOK["aiza"]}
+
+
+def _repl(drop=(), **kw):
+    """새 실행 방식(REPL)의 결과 꼴 — 문서의 열쇠(code·result·stdout·stderr·toolsUsed)에 kw를 덮고 drop의 열쇠를 뺀다."""
+    resp = {"code": CODE, "result": None, "stdout": "", "stderr": "", "toolsUsed": ["Bash"]}
+    resp.update(kw)
+    for k in drop:
+        del resp[k]
+    return ("REPL", {"code": resp["code"]}, resp)
+
+
+REPL_WITH_VALUE = [  # (꼴, 가린 개수)
+    (_repl(result='DB_PASSWORD = "%s"\nPORT = 8080\n' % F), 1),
+    (_repl(stdout='DB_PASSWORD = "%s"\n' % F), 1),
+    (_repl(stderr="Error: postgres://app:%s@db/app" % F), 1),
+    (_repl(error='Error: password="%s"' % F), 1),                # 코드가 실패했을 때만 오는 error
+    (_repl(drop=("result",), stdout='DB_PASSWORD = "%s"\n' % F), 1),  # result가 없다
+    (_repl(code='const password = "%s"; password' % F, result="ok"), 1),  # 코드 글에 값이 글자로 들었다
+    (_repl(result={"out": "SECRET_KEY=%s" % F}), 1),            # 글이 아닌 result — 꼴은 그대로, 안의 글만
+]
+REPL_WITHOUT_VALUE = [
+    _repl(result="ok"), _repl(), _repl(drop=("result",), stdout="PORT=1\n"), _repl(result=5),
+    _repl(result="ok", images=[{"type": "image", "source": dict(PIC)}]),
+    _repl(result="ok", documents=[{"type": "document", "source": dict(PIC, media_type="application/pdf")}]),
 ]
 
 
@@ -693,3 +727,126 @@ def test_hook_command_from_hooks_json(tmp_path):
     r = _hook_run(KIT, tmp_path, tool, tool_input, resp)
     assert r.returncode == 0 and b"PLANTED" not in r.stdout
     assert F not in json.dumps(json.loads(r.stdout)["hookSpecificOutput"]["updatedToolOutput"])
+
+
+@pytest.mark.parametrize("shape,n", REPL_WITH_VALUE,
+                         ids=["result", "stdout", "stderr", "error", "no-result", "code", "dict-result"])
+def test_repl_shape_kept(tmp_path, shape, n):
+    tool, tool_input, resp = shape
+    assert F in json.dumps(resp)
+    r = run(payload(tool, tool_input, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert r.returncode == 0 and r.stderr == b""
+    text = r.stdout.decode("ascii")
+    assert text.endswith("\n") and text.count("\n") == 1
+    out = json.loads(text)
+    assert list(out) == ["hookSpecificOutput"]
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert list(hso) == ["hookEventName", "updatedToolOutput", "additionalContext"]
+    new = hso["updatedToolOutput"]
+    changed = []
+    _walk(resp, new, changed)
+    assert changed
+    assert F not in json.dumps(new)
+    assert hso["additionalContext"] == M.NOTE % (n, MARK)
+    for k in ("code", "stdout", "stderr"):
+        assert isinstance(new[k], str), k
+    if "error" in resp:
+        assert isinstance(new["error"], str)
+    else:
+        assert "error" not in new
+    assert new["toolsUsed"] == resp["toolsUsed"]
+    assert ("result" in new) == ("result" in resp)
+
+
+@pytest.mark.parametrize("shape", REPL_WITHOUT_VALUE, ids=["ok", "null", "no-result", "number", "images", "documents"])
+def test_repl_silent(tmp_path, shape):
+    tool, tool_input, resp = shape
+    r = run(payload(tool, tool_input, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+
+
+def test_repl_images_untouched(tmp_path):
+    tool, tool_input, resp = _repl(result='DB_PASSWORD = "%s"' % F, images=[{"type": "image", "source": dict(PIC)}],
+                                   documents=[{"type": "document", "source": dict(PIC)}])
+    r = run(payload(tool, tool_input, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert r.returncode == 0 and r.stderr == b"" and r.stdout
+    hso = json.loads(r.stdout)["hookSpecificOutput"]
+    new = hso["updatedToolOutput"]
+    assert new["images"] == resp["images"] and new["documents"] == resp["documents"]
+    assert MARK in new["result"] and F not in new["result"]
+    assert hso["additionalContext"] == M.NOTE % (1, MARK)
+
+
+def test_repl_data_file(tmp_path):
+    code = "await $`cat config/app.yml`.text()"
+    resp = {"code": code, "result": "signing_key: %s\nport: 1" % L, "stdout": "", "stderr": "", "toolsUsed": ["Bash"]}
+    r = run(payload("REPL", {"code": code}, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert r.returncode == 0 and r.stderr == b""
+    assert json.loads(r.stdout)["hookSpecificOutput"]["updatedToolOutput"]["result"] == "signing_key: " + MARK + "\nport: 1"
+
+
+def test_hook_command_repl(tmp_path):
+    tool, tool_input, resp = REPL_WITH_VALUE[0][0]
+    r = _hook_run(KIT, tmp_path, tool, tool_input, resp)
+    assert r.returncode == 0 and r.stderr == b""
+    hso = json.loads(r.stdout)["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse" and F not in json.dumps(hso["updatedToolOutput"])
+    tool, tool_input, resp = REPL_WITHOUT_VALUE[0]
+    r = _hook_run(KIT, tmp_path, tool, tool_input, resp)
+    assert (r.returncode, r.stdout) == (0, b"")
+
+
+def test_other_tool_images_masked(tmp_path):
+    resp = {"stdout": "", "stderr": "", "images": ['DB_PASSWORD="%s"' % F]}
+    r = run(payload("Bash", {"command": "cat a"}, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert r.returncode == 0 and r.stderr == b"" and r.stdout
+    hso = json.loads(r.stdout)["hookSpecificOutput"]
+    assert F not in json.dumps(hso["updatedToolOutput"])
+    assert hso["additionalContext"] == M.NOTE % (1, MARK)
+    assert M.mask_any({"images": [{"type": "base64", "data": 'DB_PASSWORD="%s"' % F}]})[1] == 1   # REPL이 아니면 data도 가린다
+    resp = {"stdout": "", "stderr": "", "images": [{"type": "base64", "data": 'DB_PASSWORD="%s"' % F}]}
+    r = run(payload("Bash", {"command": "cat a"}, resp, tmp_path), tmp_path / "home", tmp_path)   # 훅을 지나도 같다
+    assert r.returncode == 0 and r.stdout and F not in r.stdout.decode()
+
+
+@pytest.mark.parametrize("extra", [
+    {"documents": [{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "DB_PASSWORD=%s" % F}}]},
+    {"documents": [{"type": "document", "title": 'password="%s"' % F, "source": dict(PIC, media_type="application/pdf")}]},
+    {"images": [{"type": "image", "source": {"type": "url", "url": "https://u:%s@h/x.png" % F}}]},
+    {"images": [{"type": "image", "source": dict(PIC, note='password="%s"' % F)}]},
+    {"result": {"type": "base64", "data": 'DB_PASSWORD="%s"' % F}},
+    {"result": {"files": [{"type": "base64", "data": "SECRET_KEY=%s" % F, "name": "x"}]}},
+    {"result": {"images": [{"type": "base64", "data": 'DB_PASSWORD="%s"' % F}]}},
+    {"images": {"type": "base64", "data": 'DB_PASSWORD="%s"' % F}},
+    {"result": [{"type": "base64", "data": 'DB_PASSWORD="%s"' % F}]},
+    {"images": [{"type": "base64", "data": 'DB_PASSWORD="%s"' % F}]},
+], ids=["doc-text", "doc-title", "image-url", "b64-sibling", "result-b64", "result-b64-deep",
+        "nested-images", "images-not-list", "result-list", "plain-in-data"])
+def test_repl_attached_text_masked(tmp_path, extra):
+    tool, tool_input, resp = _repl(**dict({"result": "ok"}, **extra))
+    r = run(payload(tool, tool_input, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert r.returncode == 0 and r.stderr == b"" and r.stdout
+    hso = json.loads(r.stdout)["hookSpecificOutput"]
+    assert F not in json.dumps(hso["updatedToolOutput"])
+    assert hso["additionalContext"] == M.NOTE % (1, MARK)
+
+
+def test_repl_json_result_gap(tmp_path):
+    tool, tool_input, resp = _repl(result=json.dumps({"tests": "ok\nDB_PASSWORD=%s\n" % F}))
+    r = run(payload(tool, tool_input, resp, tmp_path), tmp_path / "home", tmp_path)
+    assert (r.returncode, r.stdout, r.stderr) == (0, b"", b"")
+
+
+def test_readme_code_mode():
+    lines = section()
+    hits = [x for x in lines if "Code Mode" in x]
+    assert len(hits) == 1
+    line = hits[0]
+    for s in ("실제 세션으로는 확인하지 못했다", "가짜 값", "`@` 없이", "쓰지 않는다", "묶어 돌려준", "다 꺼진다"):
+        assert s in line, s
+    assert MARK not in line
+    start = next(i for i, x in enumerate(lines) if "**못 가리는 것:**" in x)
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("- ")), len(lines))
+    assert line in lines[start:end]
+    assert sum("Code Mode" in x for x in README.read_text(encoding="utf-8").splitlines()) == 1

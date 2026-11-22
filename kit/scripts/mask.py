@@ -294,7 +294,7 @@ def mask_text(text, keyed=True, data=False, cwd=""):
 
 def keyed_for(tool, tool_input, cwd=""):
     """(이름으로 찾는 가림을 할 것인가, 설정 파일만 읽었는가) — 시험 파일만 읽은 호출이면 앞이 False.
-    명령(Bash)은 건너뛰지 않는다 — 명령 글만으로는 무엇을 찍었는지 다 알 수 없다(`cat tests/a.py .env`)."""
+    명령(Bash)과 코드(REPL — 새 실행 방식)는 건너뛰지 않는다 — 명령·코드 글만으로는 무엇을 찍었는지 다 알 수 없다(`cat tests/a.py .env`)."""
     names = []
     if isinstance(tool_input, dict):
         if tool in ("Read", "Edit", "Write"):
@@ -303,37 +303,46 @@ def keyed_for(tool, tool_input, cwd=""):
             names = [str(tool_input.get("path") or "")]
         elif tool == "Bash":
             names = FILE_TOKEN.findall(str(tool_input.get("command") or ""))
+        elif tool == "REPL":
+            names = FILE_TOKEN.findall(str(tool_input.get("code") or ""))
     names = [n for n in names if n]
     if not names:
         return True, False
-    return tool == "Bash" or not all(testish(n, cwd) for n in names), all(DATAISH.search(n) for n in names)
+    return tool in ("Bash", "REPL") or not all(testish(n, cwd) for n in names), all(DATAISH.search(n) for n in names)
 
 
-def mask_any(obj, keyed=True, data=False, cwd=""):
+B64ISH = re.compile(r"[A-Za-z0-9+/_\-\s]*={0,2}")
+
+
+def mask_any(obj, keyed=True, data=False, cwd="", skip_b64=False):
     """결과(글·사전·목록)를 같은 꼴로 되돌리되 글만 가린다 — (새 결과, 가린 개수). 재귀 없이.
 
-    그림은 건드리지 않는다: 열쇠 `base64`의 글, `isImage`가 참인 사전의 `stdout`, `data:image/`로 시작하는 글."""
+    그림은 건드리지 않는다: 열쇠 `base64`의 글, `isImage`가 참인 사전의 `stdout`, `data:image/`로 시작하는 글,
+    skip_b64가 참이면(코드 결과 — REPL) 맨 위 `images`·`documents` 목록 아래에서 `type`이 `base64`인 사전의 `data` 글
+    (base64 글자만으로 된 것 — 따옴표·`:`·가운데 `=`가 든 글은 가린다)."""
     total = 0
     if isinstance(obj, str):
         return mask_text(obj, keyed, data, cwd)
     if not isinstance(obj, (dict, list)):
         return obj, 0
     root = json.loads(json.dumps(obj))       # 깊은 사본
-    stack = [root]
+    stack = [(root, False)]                  # (칸, 맨 위 images·documents 목록 아래인가)
     while stack:
-        cur = stack.pop()
+        cur, att = stack.pop()
         is_dict = isinstance(cur, dict)
         image = is_dict and cur.get("isImage") is True
+        b64 = att and is_dict and cur.get("type") == "base64"
         for k, v in list(cur.items() if is_dict else enumerate(cur)):
             if isinstance(v, str):
-                if (is_dict and (k == "base64" or (image and k == "stdout"))) or v.startswith("data:image/"):
+                if (is_dict and (k == "base64" or (image and k == "stdout") or (b64 and k == "data" and B64ISH.fullmatch(v)))) or v.startswith("data:image/"):
                     continue
                 new, n = mask_text(v, keyed, data, cwd)
                 if n:
                     cur[k] = new
                     total += n
             elif isinstance(v, (dict, list)):
-                stack.append(v)
+                stack.append((v, att or (skip_b64 and cur is root and is_dict
+                                         and k in ("images", "documents") and isinstance(v, list))))
     return root, total
 
 
@@ -365,7 +374,7 @@ def main():
         cwd = data.get("cwd")
         cwd = cwd if isinstance(cwd, str) else ""
         keyed, dataish = keyed_for(data.get("tool_name"), data.get("tool_input"), cwd)
-        new, n = mask_any(data.get("tool_response"), keyed, dataish, cwd)
+        new, n = mask_any(data.get("tool_response"), keyed, dataish, cwd, data.get("tool_name") == "REPL")
         if not n:
             return 0
         out = {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": new,
