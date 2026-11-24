@@ -832,8 +832,9 @@ def fake_world(tmp_path):
     sha = hashlib.sha256(b"GOOD\n").hexdigest()
     cfg = json.loads(TASKS.read_text(encoding="utf-8"))
     cfg["stage"] = str(S)
-    for k in ("b1", "b2"):
-        cfg["tasks"][k]["base"] = bbase
+    for k, t in cfg["tasks"].items():
+        if t.get("tar") == cfg["tasks"]["b1"]["tar"]:
+            t["base"] = bbase
     cfg["tasks"]["c1"].update({"base": base, "fix": fix, "sealed": {"tests/aggregation/tests.py": sha},
                                "hidden": ["aggregation.tests.AggregateTestCase.test_group_by_transform_column"], "part": ["queries", "aggregation"]})
     cfg["tasks"]["c2"].update({"base": base, "fix": fix, "sealed": {"tests/aggregation/tests.py": sha},
@@ -1063,7 +1064,8 @@ def test_sub_name_rejected(fake_world):
     for a in (["tests-a", "--root", str(w["R"]), "r03", "--sub", "../x"], ["tests-a", "--root", str(w["R"]), "r03", "--sub", "A"],
               ["walk-b", "--root", str(w["R"]), "r11", "--sub", "../x"], ["walk-b", "--root", str(w["R"]), "r11", "--sub", ""],
               ["walk-b", "--root", str(w["R"]), "r11", "--sub", "BAD-"],
-              ["blank-a", "--root", str(w["R"]), "r03", "--sub", "ruler2"]):
+              ["blank-a", "--root", str(w["R"]), "r03", "--sub", "ruler2"],
+              ["check-c", "--root", str(w["R"]), "--base", "c1", "--sub", "ruler2"]):
         rc, out = cli(w, *a)
         assert rc == 2, (a, out)
         assert "--sub" in out and "인자 틀림" in out, (a, out)   # F8: 이름 때문에 멈춘 것(다른 까닭의 끝 값 2가 아니라)
@@ -1464,3 +1466,400 @@ def test_y2_prefers_path_ending_in_year_over_text(sw):   # 22-4: 메뉴에 연�
     res, notes = {}, {}
     sw.y_scenes(PageCli(pages), res, notes)
     assert res["Y2"] is True and res["Y1"] is True, notes
+
+
+# ---------- Task 9: w·y 실행 · kit09 · a3 · 양식 고르기 ----------
+
+def cfg_y(rows):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    cfg["round_y"] = rows
+    return cfg
+
+
+def tree_snap(root):
+    root = Path(root)
+    if not root.exists():
+        return None
+    return sorted((str(p.relative_to(root)), p.stat().st_size if p.is_file() else -1) for p in root.rglob("*"))
+
+
+def test_task_of_round_y(sw):
+    cfg = cfg_y([["y03", "b3", "p"], ["w01", "a3", "p"]])
+    assert sw.task_of(cfg, "y03") == "b3" and sw.task_of(cfg, "w01") == "a3"
+    assert sw.task_of(cfg, "r03") == "a1" and sw.task_of(cfg, "r11") == "b2" and sw.task_of(cfg, "z01") == "z0"
+    assert sw.task_of(cfg, "y77") is None
+
+
+def test_walk_port_new_letters(sw):
+    cfg = {"ports": {"walk_base": 18300, "walk_range": 100, "base": {"b1": 18390}}}
+    for run, port in (("y00", 18370), ("y19", 18389), ("w01", 18325), ("w15", 18339), ("r01", 18301), ("x03", 18323),
+                      ("x04", 18324), ("v01", 18341), ("z01", 18361)):
+        assert sw.walk_port(cfg, run, None) == port, run
+    for run in ("y20", "w16", "w00"):
+        with pytest.raises(sw.WalkError):
+            sw.walk_port(cfg, run, None)
+    assert sw.walk_port(cfg, "r01", "b1") == 18390
+
+
+def test_check_y_sub(sw):
+    for args in (("y01", None, None), ("w03", None, "ruler2"), (None, "b3", None)):
+        with pytest.raises(sw.WalkError) as e:
+            sw.check_y_sub(*args)
+        assert "w·y 실행과 b3 바탕은 --sub kit09 로 부른다" in str(e.value)
+    assert sw.Y_SUB == "kit09"
+    for args in (("y01", None, "kit09"), (None, "b3", "kit09"), ("r01", None, None), ("r01", None, "ruler2"),
+                 (None, "b1", None), ("x02", None, None)):
+        assert sw.check_y_sub(*args) is None
+
+
+def test_y_run_without_sub_writes_nothing(sw, tmp_path, monkeypatch):
+    cfg = cfg_y([["y01", "a3", "p"], ["y03", "b1", "p"], ["y04", "c1", "p"]])
+    S, R = tmp_path / "S", tmp_path / "R"
+    S.mkdir()
+    R.mkdir()
+    started = []
+    monkeypatch.setattr(sw, "run_cmd", lambda *a, **k: started.append(a) or (0, ""))
+    monkeypatch.setattr(sw, "free_port", lambda port: started.append(port) or True)
+    before = (tree_snap(S), tree_snap(R))
+    for call in (lambda: sw.blank_a(cfg, str(R), "y01"),
+                 lambda: sw.cmd_tests_a(cfg, str(S), str(R), "y01"),
+                 lambda: sw.cmd_walk_b(cfg, str(S), str(R), "y03", None),
+                 lambda: sw.cmd_check_c(cfg, str(S), str(R), "y04", None, False)):
+        with pytest.raises(sw.WalkError):
+            call()
+        assert (tree_snap(S), tree_snap(R)) == before
+    assert started == []
+
+
+def test_a_scenes(sw):
+    cfg = cfg_y([])
+    cfg["tasks"]["zq"] = {"stage": "a"}
+    cfg["tasks"]["zr"] = {"stage": "a", "scenes": ["Q1"]}
+    cfg["tasks"]["zb"] = {"stage": "b"}
+    assert sw.a_scenes(cfg, "a1") == ["A1", "A2", "A3", "A4", "A5"] and sw.a_scenes(cfg, "a2") == ["P1", "P2", "P3", "P4", "P5"]
+    assert sw.a_scenes(cfg, "a3") == ["L1", "L2", "L3", "L4", "L5"]
+    assert sw.a_scenes(cfg, "zq") == [] and sw.a_scenes(cfg, "zr") == ["Q1"]
+    for t in ("zb", "nope"):
+        with pytest.raises(sw.WalkError):
+            sw.a_scenes(cfg, t)
+
+
+def test_blank_a_sub_writes_only_sub_dir(sw, tmp_path):
+    cfg = cfg_y([["y01", "a3", "p"]])
+    R = tmp_path / "R"
+    assert sw.blank_a(cfg, str(R), "y01", sub="kit09") is True
+    d = json.loads((R / "out-done" / "kit09" / "y01.walk.json").read_text(encoding="utf-8"))
+    assert [k for k in d if k not in sw.A_FLAGS and k != "notes"] == ["L1", "L2", "L3", "L4", "L5"]
+    assert all(d[k] is None for k in ["L1", "L2", "L3", "L4", "L5"] + sw.A_FLAGS) and d["notes"] == {}
+    assert not (R / "out-done" / "y01.walk.json").exists()
+    assert sw.blank_a(cfg, str(R), "y01", sub="kit09") is False
+    assert tree_snap(R / "out-done") == sorted([("kit09", -1), ("kit09/y01.walk.json", (R / "out-done" / "kit09" / "y01.walk.json").stat().st_size)])
+
+
+def test_blank_a_sub_cli(fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_y=[["y01", "a3", "p"]])
+    w["tj"].write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    rc, out = cli(w, "blank-a", "y01", "--sub", "kit09", "--root", str(w["R"]))
+    assert rc == 0, out
+    assert (w["R"] / "out-done" / "kit09" / "y01.walk.json").is_file() and not (w["R"] / "out-done" / "y01.walk.json").exists()
+    rc, out = cli(w, "blank-a", "y01", "--root", str(w["R"]))
+    assert rc == 2 and not (w["R"] / "out-done" / "y01.walk.json").exists(), out
+
+
+def test_tests_a_accepts_a3_with_sub(sw, tmp_path, monkeypatch):
+    cfg = cfg_y([["y01", "a3", "p"]])
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"app.py": "", "test_app.py": ""}, run="y01")
+    sw.blank_a(cfg, R, "y01", sub="kit09")
+    assert sw.cmd_tests_a(cfg, S, R, "y01", sub="kit09") == 0
+    assert walk_of(R, "y01", "kit09")["시험없음"] is False
+    assert (Path(R) / "walk" / "kit09-y01-tests" / "w").is_dir()
+    assert not (Path(R) / "out-done" / "y01.walk.json").exists() and not (Path(R) / "walk" / "y01-tests").exists()
+
+
+def test_check_c_sub_writes_only_sub_dir(sw, tmp_path, monkeypatch, fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_y=[["y04", "c1", "p"]])
+    assert cli(w, "prep", "--root", str(w["R"]))[0] == 0
+    done = w["S"] / "done" / "y04" / "w"
+    sw.make_copy(w["S"] / "src-c" / "repo", w["base"], done)
+    git(done, "add", "-A")
+    git(done, "commit", "-q", "-m", "end", check=False)
+    res = {"ran": 1, "ok": True, "failures": 0, "errors": 0, "failed": []}
+    monkeypatch.setattr(sw, "run_runtests", lambda *a, **k: (dict(res), "Django installed in '/nowhere'"))
+    assert sw.cmd_check_c(cfg, str(w["S"]), str(w["R"]), "y04", None, False, sub="kit09") == 0
+    assert (w["R"] / "out-done" / "kit09" / "y04.hidden.json").is_file()
+    assert not (w["R"] / "out-done" / "y04.hidden.json").exists()
+    assert (w["R"] / "walk" / "kit09-y04").is_dir() and not (w["R"] / "walk" / "y04").exists()
+
+
+PICK_HTML = """
+<form action="/search" method="get"><input type="text" name="query" value="zz"></form>
+<form action="/profile" method="POST">
+  <input type="hidden" name="csrf_token" value="tok9">
+  <input type="email" name="email" value="a@b.invalid">
+  <input type="submit" name="go" value="Save">
+</form>
+<form action="/other"><input type="text" name="email" value="late"></form>
+"""
+
+
+def test_pick_form_by_field_and_method(sw):
+    got = sw.pick_form(PICK_HTML, "email")
+    assert got["action"] == "/profile" and got["method"] == "post"
+    assert got["pairs"] == [("csrf_token", "tok9"), ("email", "a@b.invalid")]
+    assert sw.pick_form(PICK_HTML, "email", "get")["action"] == "/other"
+    assert sw.pick_form(PICK_HTML, "query", "get")["pairs"] == [("query", "zz")]
+    assert sw.pick_form(PICK_HTML, "query") is None
+    assert sw.pick_form(PICK_HTML, "nothing") is None
+    assert sw.form_pairs(PICK_HTML) == [("query", "zz")]
+
+
+# ---------- Task 10: b3 걸어 보기 장면 U1~U4 ----------
+
+SEEDS = ["Sea Song", "Mountain Path", "Winter Letter", "No Date", "Old Map", "Small House"]
+U_OLD = ('<input type="text" name="name" value="zzadmin"><input type="email" name="email" value="zz@example.invalid">'
+         '<input type="text" name="kindle_mail" value=""><select name="locale"><option value="en" selected>en</option></select>'
+         '<select name="default_language"><option value="all" selected>all</option></select>')
+U_SEARCH = '<form action="/search" method="get"><input type="text" name="query" value=""></form>'
+
+
+def me_page(extra='<input type="text" name="list_page_len" value="">', old=U_OLD):
+    return (U_SEARCH + '<form action="/me" method="post"><input type="hidden" name="csrf_token" value="zzFAKEvalue9">'
+            + old + extra + '<input type="submit" name="save" value="Save"></form>')
+
+
+class PostPageCli(PageCli):
+    def __init__(self, pages, posts=None):
+        super().__init__(pages)
+        self.posts = [] if posts is None else posts
+
+    def post(self, path, pairs):
+        self.posts.append((path, pairs))
+        return self.pages.get(("POST", path))
+
+
+class UServer(PostPageCli):
+    """저장한 값대로 목록 수가 바뀌는 가짜 서버. 망가뜨리는 길은 열쇠말로."""
+
+    def __init__(self, field="list_page_len", me=None, fail_empty=False, link="/page/2?sort=new", pub_both=False,
+                 get_boom=None, post_boom=False):
+        super().__init__({})
+        self.field, self.me = field, me if me is not None else me_page('<input type="text" name="%s" value="">' % field)
+        self.val, self.fail_empty, self.link, self.pub_both = "", fail_empty, link, pub_both
+        self.get_boom, self.post_boom = get_boom, post_boom
+
+    def _home(self, titles, link=""):
+        band = '<div class="discover random-books">' + "".join("<a href='/book/x'>%s</a>" % t for t in SEEDS) + "</div>"
+        main = '<div class="discover load-more">' + "".join("<a href='/book/x'>%s</a>" % t for t in titles) + link + "</div>"
+        return band + main
+
+    def get(self, path):
+        if path == self.get_boom:
+            raise OSError("zz boom")
+        if path == "/me":
+            return 200, {}, self.me
+        if path == "/":
+            if self.val == "2":
+                return 200, {}, self._home(SEEDS[2:4], '<a href="%s">2</a>' % self.link if self.link else "")
+            return 200, {}, self._home(SEEDS)
+        if path == "/publisher":
+            return 200, {}, '<a href="/publisher/stored/2">South House</a><a href="/publisher/stored/1?x=1#t">North Press</a>'
+        if path == "/publisher/stored/1?x=1":
+            return 200, {}, self._home(SEEDS[:2] if (self.val != "1" or self.pub_both) else SEEDS[:1])
+        return 404, {}, ""
+
+    def post(self, path, pairs):
+        if self.post_boom:
+            raise OSError("zz boom")
+        self.posts.append((path, pairs))
+        d = dict(pairs)
+        if self.fail_empty and d.get(self.field) == "":
+            return 500, {}, ""
+        self.val = d.get(self.field, "")
+        return 302, {}, ""
+
+
+ALL4 = {"U1": True, "U2": True, "U3": True, "U4": True}
+NONE4 = {"U1": False, "U2": False, "U3": False, "U4": False}
+
+
+def test_u_scenes_all_pass(sw):
+    srv = UServer()
+    res, notes = {}, {}
+    sw.u_scenes(srv, "/nowhere/metadata.db", res, notes)
+    assert res == ALL4, notes
+    assert all(path == "/me" for path, _ in srv.posts) and [dict(p)["list_page_len"] for _, p in srv.posts] == ["2", "", "1"]
+
+
+@pytest.mark.parametrize("scene,kw,want", [
+    ("U1", dict(me=me_page("")), NONE4),                                   # 새 칸이 없음 — U1이 안 되면 U2~U4도 안 됨
+    ("U2", dict(link=None), dict(ALL4, U2=False)),                        # /page/2 링크가 없음
+    ("U3", dict(fail_empty=True), dict(ALL4, U3=False)),                  # 비워 저장하면 500
+    ("U4", dict(pub_both=True), dict(ALL4, U4=False)),                    # 출판사 목록은 둘 다 나옴
+])
+def test_u_scenes_each_fails(sw, scene, kw, want):
+    res, notes = {}, {}
+    sw.u_scenes(UServer(**kw), "/nowhere/metadata.db", res, notes)
+    assert res == want and all(type(v) is bool for v in res.values()), (scene, notes)
+
+
+def test_me_form_ignores_inputs_after_form_close(sw):
+    # 양식이 닫힌 뒤(양식 밖)의 이름 있는 칸은 새 칸 후보로 세지 않는다
+    body = ('<form method="post" action="/me"><input name="email"><input name="name">'
+            '<input type="number" name="rows_wanted"></form>'
+            '<div class="modal"><input name="filter_text"><select name="pick_one"></select></div>')
+    form, new = sw.me_form(body)
+    assert new == "rows_wanted"
+    # 닫는 표시가 없는 글은 앞처럼 다음 양식(또는 글 끝)까지 본다
+    form, new = sw.me_form('<form method="post" action="/me"><input name="email"><input name="rows_wanted">')
+    assert new == "rows_wanted"
+
+
+def test_u_scenes_no_field_means_nothing_posted(sw):
+    srv = UServer(me=me_page(""))
+    res, notes = {}, {}
+    sw.u_scenes(srv, "/nowhere/metadata.db", res, notes)
+    assert res == NONE4 and srv.posts == [] and "U1" in notes
+
+
+def test_u_scenes_picks_post_form_not_search(sw):
+    srv = UServer()
+    res, notes = {}, {}
+    sw.u_scenes(srv, "/nowhere/metadata.db", res, notes)
+    assert res["U1"] is True and srv.posts
+    for path, pairs in srv.posts:
+        names = [k for k, _ in pairs]
+        assert path == "/me" and "query" not in names and "email" in names and "csrf_token" in names
+        assert dict(pairs)["email"] == "zz@example.invalid" and dict(pairs)["locale"] == "en" and "save" not in names
+
+
+def test_u_scenes_new_field_choice(sw):
+    def only_u1(extra, old=U_OLD):
+        srv = UServer(me=me_page(extra, old))
+        res, notes = {}, {}
+        sw.u_scenes(srv, "/nowhere/metadata.db", res, notes)
+        return res, srv
+    # 후보가 둘 — 이름에 page가 든 것 하나만 고른다
+    res, srv = only_u1('<input type="text" name="theme_x" value="a"><input type="text" name="list_page_len" value="">')
+    assert res["U1"] is True and [k for k, _ in srv.posts[0][1]].count("list_page_len") == 1 and dict(srv.posts[0][1])["theme_x"] == "a"
+    # 둘 다 page가 들었거나 둘 다 안 들었으면 U1 안 됨 · 아무것도 안 보냄
+    for extra in ('<input name="page_a"><input name="page_b">', '<input name="theme_x"><input name="theme_y">'):
+        res, srv = only_u1(extra)
+        assert res == NONE4 and srv.posts == []
+    # 후보가 하나면 이름과 상관없이 그것
+    res, srv = only_u1('<input type="text" name="theme_x" value="">')
+    assert res["U1"] is True and "theme_x" in dict(srv.posts[0][1])
+    # 입력 칸이 아닌 것(hidden·checkbox·radio·file·password·submit·button)은 후보가 아님
+    res, srv = only_u1('<input type="hidden" name="h_page"><input type="checkbox" name="c_page" checked><input type="radio" name="r_page">'
+                       '<input type="file" name="f_page"><input type="password" name="p_page"><input type="button" name="b_page">')
+    assert res == NONE4
+    # select · textarea는 후보
+    for extra in ('<select name="list_page_len"><option value="">-</option></select>', '<textarea name="list_page_len"></textarea>'):
+        res, srv = only_u1(extra)
+        assert res["U1"] is True and "list_page_len" in dict(srv.posts[0][1])
+    # 바탕 코드에 있던 칸 이름만 있으면 새 칸이 아님
+    res, srv = only_u1("")
+    assert res == NONE4
+
+
+def test_u_scenes_cut_random_band_and_link_forms(sw):
+    # 띠 밖에는 둘만 — 띠(여섯 모두)를 잘라야 맞는다 · 링크 주소에 ?…·#… 가 붙어도 길로 본다
+    for link in ("/page/2", "/page/2?sort=new", "/page/2#top", "/books/page/2?a=1#b"):
+        res, notes = {}, {}
+        sw.u_scenes(UServer(link=link), "/nowhere/metadata.db", res, notes)
+        assert res == ALL4, (link, notes)
+    for link in ("/page/20", "/page/2/more", "/page/3?next=/page/2"):
+        res = {}
+        sw.u_scenes(UServer(link=link), "/nowhere/metadata.db", res, {})
+        assert res["U2"] is False and res["U1"] and res["U3"] and res["U4"], link
+
+
+def test_u_scenes_error_is_false_with_note(sw):
+    def go(srv):
+        res, notes = {}, {}
+        sw.u_scenes(srv, "/nowhere/metadata.db", res, notes)
+        assert set(res) == {"U1", "U2", "U3", "U4"} and all(type(v) is bool for v in res.values())
+        return res, notes
+    res, notes = go(PostPageCli({}))                                         # /me가 404
+    assert res == NONE4 and "U1" in notes
+    res, notes = go(UServer(get_boom="/me"))                                  # get이 예외
+    assert res == NONE4 and "U1" in notes
+    res, notes = go(UServer(get_boom="/"))                                    # 첫 화면이 터짐 → U2·U3만 안 됨 · U4는 간다
+    assert res == dict(ALL4, U2=False, U3=False) and "U2" in notes and "U3" in notes
+    res, notes = go(UServer(get_boom="/publisher"))
+    assert res == dict(ALL4, U4=False) and "U4" in notes
+    srv = UServer()
+    srv.post_boom = True                                                      # post가 예외
+    res, notes = go(srv)
+    assert res == dict(NONE4, U1=True) and all(k in notes for k in ("U2", "U3", "U4"))
+    res, notes = go(PostPageCli({"/me": 200}))                                # 응답 꼴이 이상함(튜플이 아님)
+    assert res == NONE4
+
+
+def b3_cfg(**kw):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    cfg["round_y"] = [["y05", "b3", "p"]]
+    cfg["ports"]["base"].setdefault("b3", 18392)
+    return cfg
+
+
+def test_walk_b_base_b3_needs_sub(sw, tmp_path, monkeypatch):
+    cfg = b3_cfg()
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    import tarfile
+    src = tmp_path / "tarsrc"
+    src.mkdir()
+    (src / "cps.py").write_text("import sys\nsys.exit(0)\n")
+    with tarfile.open(str(Path(R) / "bases" / "b.tar"), "w") as tf:
+        tf.add(str(src / "cps.py"), arcname="cps.py")
+    before = (tree_snap(S), tree_snap(R))
+    with pytest.raises(sw.WalkError):
+        sw.cmd_walk_b(cfg, S, R, None, "b3")
+    assert (tree_snap(S), tree_snap(R)) == before and not (Path(R) / "out-done").exists()
+    assert sw.cmd_walk_b(cfg, S, R, None, "b3", sub="kit09") == 0
+    out = Path(R) / "out-done"
+    assert [p.relative_to(out).as_posix() for p in out.rglob("*")] == ["kit09", "kit09/base-b3.walk.json"]
+    d = json.loads((out / "kit09" / "base-b3.walk.json").read_text(encoding="utf-8"))
+    assert [k for k in d if k != "notes"] == cfg["tasks"]["b3"]["scenes"] and not any(d[k] for k in cfg["tasks"]["b3"]["scenes"])
+
+
+def test_walk_b_dispatches_b3(sw, tmp_path, monkeypatch):
+    cfg = b3_cfg()
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    shutil.copytree(Path(S) / "done" / "r11", Path(S) / "done" / "y05")
+    monkeypatch.setattr(sw, "wait_up", lambda url, secs: True)
+    scenes = cfg["tasks"]["b3"]["scenes"]
+    called, stopped = [], []
+
+    def fake(tag, names):
+        def f(*a):
+            called.append(tag)
+            for n in names:
+                a[-2][n] = True
+        return f
+    monkeypatch.setattr(sw, "e_scenes", fake("e", [s for s in scenes if s.startswith("E")]))
+    monkeypatch.setattr(sw, "u_scenes", fake("u", [s for s in scenes if not s.startswith("E")]))
+    monkeypatch.setattr(sw, "s_scenes", fake("s", []))
+    monkeypatch.setattr(sw, "y_scenes", fake("y", []))
+    real_stop = sw.stop
+
+    def rec_stop(p, grace=10):
+        stopped.append(p)
+        return real_stop(p, grace)
+    monkeypatch.setattr(sw, "stop", rec_stop)
+    assert sw.cmd_walk_b(cfg, S, R, "y05", None, sub="kit09") == 0
+    assert called == ["e", "u"]
+    out = Path(R) / "out-done"
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == ["kit09", "kit09/y05.walk.json"]
+    d = json.loads((out / "kit09" / "y05.walk.json").read_text(encoding="utf-8"))
+    assert [k for k in d if k != "notes"] == scenes and all(d[k] is True for k in scenes)
+    assert len(stopped) == 1 and stopped[0].poll() is not None
+
+
+def test_walk_b_base_b3_choice(sw):
+    a = sw.build_parser().parse_args(["walk-b", "--base", "b3"])
+    assert a.base == "b3" and a.run is None
+    for b in ("b1", "b2"):
+        assert sw.build_parser().parse_args(["walk-b", "--base", b]).base == b

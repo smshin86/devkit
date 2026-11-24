@@ -1,3 +1,4 @@
+import copy
 import csv
 import importlib.util
 import json
@@ -6,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -136,22 +138,24 @@ def table_rows():
     return rows
 
 
-def test_txt_seven_lines_and_match_hidden_table():
+def test_txt_lines_match_hidden_table(tasks):
+    N = len(tasks["tasks"])
     rows = table_rows()
-    assert sorted(rows) == [1, 2, 3, 4, 5, 6, 7]
+    assert sorted(rows) == list(range(1, N + 1))
     for name, which in (("stage-prompts.txt", 1), ("stage-replies.txt", 2)):
         raw = (M / name).read_bytes()
         assert raw.endswith(b"\n") and b"\r" not in raw and b"\t" not in raw
         lines = raw.decode("utf-8").split("\n")[:-1]
-        assert len(lines) == 7
+        assert len(lines) == N
         for i, ln in enumerate(lines, 1):
             assert ln.strip() and ln == rows[i][which], (name, i)
 
 
 def test_task_names_in_line_order(tasks):
     names = [k for k, _ in sorted(((k, v["line"]) for k, v in tasks["tasks"].items()), key=lambda x: x[1])]
-    assert names == ["a1", "a2", "b1", "b2", "c1", "c2", "z0"]
-    assert [table_rows()[i][0] for i in range(1, 8)] == names
+    assert names[:7] == ["a1", "a2", "b1", "b2", "c1", "c2", "z0"]
+    assert set(names[7:]) == {"a3", "b3"}
+    assert [table_rows()[i][0] for i in range(1, len(names) + 1)] == names
 
 
 def test_prompts_have_no_void_words(tasks):
@@ -187,6 +191,9 @@ def test_tasks_json_keys_and_hashes(tasks):
         for sha in t["sealed"].values():
             assert re.fullmatch(r"[0-9a-f]{64}", sha)
     assert tasks["tasks"]["b1"]["base"] == tasks["tasks"]["b2"]["base"]
+    t = tasks["tasks"]
+    assert t["a3"]["stage"] == "a" and t["a3"]["tar"] is None and t["a3"]["line"] == 8
+    assert t["b3"]["base"] == t["b1"]["base"] and t["b3"]["tar"] == t["b1"]["tar"] and t["b3"]["stage"] == "b"
 
 
 def test_order_shape(tasks):
@@ -220,14 +227,19 @@ def test_sample_csv_sums():
     assert not raw.startswith(b"\xef\xbb\xbf") and b"\r" not in raw
 
 
-def test_hidden_md_sections_and_scene_lines():
+def test_hidden_md_sections_and_scene_lines(tasks):
     t = HIDDEN.read_text(encoding="utf-8")
     for h in ("## a1", "## a2", "## b공통", "## b1", "## b2", "## c1", "## c2", "## 세는 법", "## 판정 규칙"):
         assert re.search(r"^" + re.escape(h) + r"$", t, re.M), h
     lines = t.split("\n")
-    for tag in ("A1 A2 A3 A4 A5 P1 P2 P3 P4 P5 S1 S2 S3 S4 S5 Y1 Y2 Y3 Y4 E1 E2 E3 E4 E5 E6 E7").split():
-        n = sum(1 for ln in lines if ("- %s " % tag) in ln and ln.lstrip().startswith("- %s " % tag))
-        assert n == 1, tag
+    count = lambda tag: sum(1 for ln in lines if ("- %s " % tag) in ln and ln.lstrip().startswith("- %s " % tag))
+    for tag in ("A1 A2 A3 A4 A5 P1 P2 P3 P4 P5 S1 S2 S3 S4 S5 Y1 Y2 Y3 Y4").split():
+        assert count(tag) == 1, tag
+    for tag in ("E1 E2 E3 E4 E5 E6 E7").split():
+        assert count(tag) >= 1, tag
+    for name, task in tasks["tasks"].items():
+        for tag in task.get("scenes", []):
+            assert count(tag) >= 1, (name, tag)
 
 
 def test_hidden_md_ruler2_marks():
@@ -247,6 +259,310 @@ def test_hidden_md_ruler2_marks():
     assert "random-books" in sec("## b2") and "물음표" in sec("## b2") and "`if` 사슬" in sec("## b2") and "도우미마다 1" in sec("## b2")
     assert "첫 턴 마지막 답글" in sec("## 걸어 보기 규칙")
     assert "`C`" in sec("## 세는 법") and "c6ad1d9" in sec("## 고침 기록") and "x 못 잼" in sec("## 고침 기록")
+
+
+# ---------- 꼴: 새 꾸러미 실행(y) 설정 열쇠 ----------
+# 꼴 검사 몸통은 _check_…(cfg)로 빼서, 진짜 설정 시험과 메모리 사본 시험이 같이 부른다.
+
+Y_BASES = {"a1", "a2", "b1", "b2", "c1", "c2"}
+RUN_RE = r"[wy]\d{2}"
+DOLLAR_RE = r"\d{1,2}\.\d{2}"
+
+
+def _check_round_y(cfg):
+    rows = cfg["round_y"]
+    assert isinstance(rows, list) and rows
+    names = []
+    for r in rows:
+        assert isinstance(r, list) and len(r) in (3, 4), r
+        assert re.fullmatch(RUN_RE, r[0]), r[0]
+        assert r[1] in cfg["tasks"], r
+        if len(r) == 4:
+            assert r[1] == "z0" and r[3] in Y_BASES, r[0]
+        assert r[2] == "p", r[0]
+        names.append(r[0])
+    assert len(set(names)) == len(names)
+    other = {x[0] for key in ("order", "zero", "rerun") for x in cfg[key]}
+    assert not (set(names) & other)
+    for r in rows:
+        n = int(r[0][1:])
+        if r[0][0] == "w":
+            assert 1 <= n <= 15, r[0]
+        else:
+            assert 0 <= n <= 19, r[0]
+    drop = set((cfg.get("redo_y") or {}).values())
+    keep = [r for r in rows if r[0] not in drop]
+    w = Counter(r[1] for r in keep if r[0][0] == "w")
+    y = Counter(r[1] for r in keep if r[0][0] == "y")
+    assert w == Counter({"a3": 2, "b3": 2}), sorted(w.items())
+    want = Counter({"z0": 1, "a1": 2, "a2": 2, "b1": 2, "b2": 2, "a3": 2, "b3": 2, "c1": 1, "c2": 1})
+    assert y == want, sorted(y.items())
+    assert sum(y.values()) == 15
+    assert [r[1] for r in keep if r[0] == "y00"] == ["z0"]
+
+
+def _check_money_y(cfg):
+    m = cfg["money_y"]
+    assert set(m) == {"alert", "stop"}
+    for v in m.values():
+        assert isinstance(v, str) and re.fullmatch(DOLLAR_RE, v), v
+    mo = cfg["money"]
+    room = float(m["stop"]) - max(float(mo["turn_cap"]), float(mo["turn2_budget"])) - float(mo["margin"])
+    assert float(m["alert"]) <= room + 1e-9
+
+
+def _check_g3_exits_y(cfg):
+    assert cfg["g3_exits_y"] in (["0"], ["0", "11"])
+
+
+def _check_redo_y(cfg):
+    redo = cfg["redo_y"]
+    assert isinstance(redo, dict)
+    rows = {r[0]: r for r in cfg["round_y"]}
+    for k, v in redo.items():
+        assert k in rows and v in rows
+        assert k != v
+        assert rows[k][1:3] == rows[v][1:3]
+        assert rows[k][1] != "z0"
+    assert len(set(redo.values())) == len(redo)
+    assert not (set(redo.values()) & set(redo))
+
+
+def _check_ports_base_b3(cfg):
+    p = cfg["ports"]
+    base = p["base"]
+    assert base["b3"] == 18392
+    wb = p["walk_base"]
+    assert not (wb + 70 <= base["b3"] <= wb + 89)
+    assert not (wb + 25 <= base["b3"] <= wb + 39)
+    assert len(set(base.values())) == len(base)
+
+
+def _check_y_before(cfg):
+    yb = cfg["y_before"]
+    assert set(yb) == {"t3_scene", "h2_scene", "g4", "cost"}
+    assert yb["h2_scene"] in cfg["tasks"]["b3"]["scenes"]
+    assert yb["t3_scene"] in cfg["tasks"]["b2"]["scenes"]
+    assert set(yb["g4"]) == {"c1", "c2"}
+    assert set(yb["cost"]) == Y_BASES
+    for v in yb["cost"].values():
+        assert isinstance(v, str) and re.fullmatch(r"\d+\.\d{2}", v), v
+
+
+def _skip_unless(cfg, key):
+    if key not in cfg:
+        pytest.skip("메인이 아직 안 채움")
+
+
+def test_round_y_shape(tasks):
+    _skip_unless(tasks, "round_y")
+    _check_round_y(tasks)
+
+
+def test_money_y_shape(tasks):
+    _skip_unless(tasks, "money_y")
+    _check_money_y(tasks)
+
+
+def test_g3_exits_y_shape(tasks):
+    _skip_unless(tasks, "g3_exits_y")
+    _check_g3_exits_y(tasks)
+
+
+def test_redo_y_shape(tasks):
+    _skip_unless(tasks, "redo_y")
+    _check_redo_y(tasks)
+
+
+def test_ports_base_b3(tasks):
+    if "b3" not in tasks["ports"]["base"]:
+        pytest.skip("메인이 아직 안 채움")
+    _check_ports_base_b3(tasks)
+
+
+def test_y_before_shape(tasks):
+    _skip_unless(tasks, "y_before")
+    _check_y_before(tasks)
+
+
+# --- 같은 몸통을 진짜 설정의 메모리 사본에 계획 글 꼴의 값을 넣어 불러 본다 ---
+
+def y_cfg(tasks):
+    cfg = copy.deepcopy(tasks)
+    rows = [["w01", "a3", "p"], ["w02", "a3", "p"], ["w03", "b3", "p"], ["w04", "b3", "p"], ["y00", "z0", "p", "a1"]]
+    for i, t in enumerate(["a1", "a1", "a2", "a2", "b1", "b1", "b2", "b2", "a3", "a3", "b3", "b3", "c1", "c2"], 1):
+        rows.append(["y%02d" % i, t, "p"])
+    rows.append(["y15", "a1", "p"])                                   # 대신 도는 실행
+    cfg["round_y"] = rows
+    cfg["redo_y"] = {"y01": "y15"}
+    cfg["g3_exits_y"] = ["0", "11"]
+    mo = cfg["money"]
+    cfg["money_y"] = {"alert": "1.00",
+                      "stop": "%.2f" % (1.0 + max(float(mo["turn_cap"]), float(mo["turn2_budget"])) + float(mo["margin"]))}
+    cfg["ports"]["base"]["b3"] = 18392
+    cfg["y_before"] = {"t3_scene": cfg["tasks"]["b2"]["scenes"][0], "h2_scene": cfg["tasks"]["b3"]["scenes"][0],
+                       "g4": {"c1": {"k": 1}, "c2": {"k": 2}},
+                       "cost": {k: "1.00" for k in sorted(Y_BASES)}}
+    return cfg
+
+
+def test_y_cfg_copy_good_shapes_pass(tasks):
+    cfg = y_cfg(tasks)
+    for f in (_check_round_y, _check_money_y, _check_g3_exits_y, _check_redo_y, _check_ports_base_b3, _check_y_before):
+        f(cfg)
+    cfg["g3_exits_y"] = ["0"]
+    _check_g3_exits_y(cfg)
+    cfg["redo_y"] = {}
+    cfg["round_y"] = [r for r in cfg["round_y"] if r[0] != "y15"]
+    _check_round_y(cfg)
+    _check_redo_y(cfg)
+
+
+def _bad_round_y(cfg, how):
+    rows = cfg["round_y"]
+    pos = lambda n: [i for i, r in enumerate(rows) if r[0] == n][0]
+    if how == "fourth_not_z0":
+        rows[pos("y03")].append("a1")
+    elif how == "fourth_not_base":
+        rows[pos("y00")][3] = "z0"
+    elif how == "y_rows_short":
+        del rows[pos("y14")]
+    elif how == "y_rows_extra":
+        rows.append(["y16", "c1", "p"])
+    elif how == "w_rows_wrong":
+        rows[pos("w02")][1] = "b3"
+    elif how == "arm_q":
+        rows[pos("y05")][2] = "q"
+    elif how == "dup_name":
+        rows[pos("y06")][0] = "y05"
+    elif how == "bad_name":
+        rows[pos("y06")][0] = "v06"
+    elif how == "w_number":
+        rows[pos("w04")][0] = "w16"
+    elif how == "y_number":
+        rows[pos("y14")][0] = "y20"
+    elif how == "row_len":
+        rows[pos("y05")].append("x")
+        rows[pos("y05")].append("x")
+
+
+@pytest.mark.parametrize("how", ["fourth_not_z0", "fourth_not_base", "y_rows_short", "y_rows_extra", "w_rows_wrong", "arm_q",
+                                 "dup_name", "bad_name", "w_number", "y_number", "row_len"])
+def test_check_round_y_catches_bad_shapes(tasks, how):
+    cfg = y_cfg(tasks)
+    _bad_round_y(cfg, how)
+    with pytest.raises(AssertionError):
+        _check_round_y(cfg)
+
+
+def test_check_round_y_catches_name_collision_with_order(tasks):
+    cfg = y_cfg(tasks)
+    cfg["rerun"] = copy.deepcopy(cfg["rerun"]) + [["y05", "a1", "p"]]
+    with pytest.raises(AssertionError):
+        _check_round_y(cfg)
+
+
+def test_check_round_y_without_redo_counts_all_rows(tasks):
+    cfg = y_cfg(tasks)
+    cfg["redo_y"] = {}                       # 대신 도는 실행을 안 뺐으니 a1이 셋이 되어 걸려야 한다
+    with pytest.raises(AssertionError):
+        _check_round_y(cfg)
+
+
+@pytest.mark.parametrize("how", ["extra_key", "missing_key", "not_str", "bad_form", "over_relation"])
+def test_check_money_y_catches_bad_shapes(tasks, how):
+    cfg = y_cfg(tasks)
+    m = cfg["money_y"]
+    if how == "extra_key":
+        m["note"] = "1.00"
+    elif how == "missing_key":
+        del m["alert"]
+    elif how == "not_str":
+        m["alert"] = 1.0
+    elif how == "bad_form":
+        m["stop"] = "9"
+    else:
+        m["alert"] = "%.2f" % (float(m["stop"]) + 0.01)               # 관계보다 큼
+    with pytest.raises(AssertionError):
+        _check_money_y(cfg)
+
+
+def test_check_money_y_edge_equal_passes(tasks):
+    cfg = y_cfg(tasks)
+    mo = cfg["money"]
+    cfg["money_y"]["alert"] = "%.2f" % (float(cfg["money_y"]["stop"]) - max(float(mo["turn_cap"]), float(mo["turn2_budget"])) - float(mo["margin"]))
+    _check_money_y(cfg)
+
+
+@pytest.mark.parametrize("val", [["0", "12"], ["11"], [], ["0", "11", "12"], "0", [0]])
+def test_check_g3_exits_y_catches_bad_shapes(tasks, val):
+    cfg = y_cfg(tasks)
+    cfg["g3_exits_y"] = val
+    with pytest.raises(AssertionError):
+        _check_g3_exits_y(cfg)
+
+
+@pytest.mark.parametrize("how", ["not_dict", "key_unknown", "same", "other_task", "other_arm", "dup_value", "chain", "z0"])
+def test_check_redo_y_catches_bad_shapes(tasks, how):
+    cfg = y_cfg(tasks)
+    cfg["round_y"] += [["y16", "a1", "p"], ["y17", "a2", "q"], ["y18", "z0", "p"], ["y19", "z0", "p"]]
+    if how == "not_dict":
+        cfg["redo_y"] = [["y01", "y15"]]
+    elif how == "key_unknown":
+        cfg["redo_y"] = {"y99": "y15"}
+    elif how == "same":
+        cfg["redo_y"] = {"y15": "y15"}
+    elif how == "other_task":
+        cfg["redo_y"] = {"y03": "y15"}
+    elif how == "other_arm":
+        cfg["redo_y"] = {"y01": "y17"}
+    elif how == "dup_value":
+        cfg["redo_y"] = {"y01": "y15", "y02": "y15"}
+    elif how == "chain":
+        cfg["redo_y"] = {"y01": "y15", "y15": "y16"}
+    else:
+        cfg["redo_y"] = {"y18": "y19"}
+    with pytest.raises(AssertionError):
+        _check_redo_y(cfg)
+
+
+@pytest.mark.parametrize("how", ["wrong_port", "in_y_slots", "in_w_slots", "overlap"])
+def test_check_ports_base_b3_catches_bad_shapes(tasks, how):
+    cfg = y_cfg(tasks)
+    b = cfg["ports"]["base"]
+    wb = cfg["ports"]["walk_base"]
+    if how == "wrong_port":
+        b["b3"] = 18393
+    elif how == "in_y_slots":
+        b["b3"] = wb + 75
+    elif how == "in_w_slots":
+        b["b3"] = wb + 30
+    else:
+        b["b2"] = 18392
+    with pytest.raises(AssertionError):
+        _check_ports_base_b3(cfg)
+
+
+@pytest.mark.parametrize("how", ["extra_key", "missing_key", "h2_not_b3", "t3_not_b2", "g4_keys", "cost_keys", "cost_form"])
+def test_check_y_before_catches_bad_shapes(tasks, how):
+    cfg = y_cfg(tasks)
+    yb = cfg["y_before"]
+    if how == "extra_key":
+        yb["x"] = 1
+    elif how == "missing_key":
+        del yb["g4"]
+    elif how == "h2_not_b3":
+        yb["h2_scene"] = "zzNOSCENE9"
+    elif how == "t3_not_b2":
+        yb["t3_scene"] = "zzNOSCENE9"
+    elif how == "g4_keys":
+        yb["g4"] = {"c1": {}}
+    elif how == "cost_keys":
+        del yb["cost"]["c2"]
+    else:
+        yb["cost"]["a1"] = "1.0"
+    with pytest.raises(AssertionError):
+        _check_y_before(cfg)
 
 
 def test_bad_regexes_match_marked_lines(st, tasks):
@@ -326,6 +642,32 @@ def test_order_cli(tmp_path, tasks):
     f.write_text(json.dumps(t2), encoding="utf-8")
     assert run("order", f, "x01", "c1", "p")[0] == 0
     assert run("order", f, "x01", "c1", "q")[0] == 2
+
+
+def test_run_names_orders_new_letters(st, tmp_path):
+    for n in "r02 r01 x01 v01 w02 w01 y10 y00 z01".split():
+        (tmp_path / (n + ".json")).write_text("{}", encoding="utf-8")
+    assert st.run_names(str(tmp_path)) == ["r01", "r02", "v01", "x01", "w01", "w02", "y00", "y10"]
+
+
+def test_order_cli_round_y(tmp_path, tasks):
+    f = tmp_path / "tasks.json"
+    f.write_text(json.dumps(dict(tasks, round_y=[["y01", "a1", "p"], ["y00", "z0", "p", "a1"],
+                                                 ["w01", "a3", "p"]])), encoding="utf-8")
+    assert run("order", f, "y01", "a1", "p")[0] == 0
+    assert run("order", f, "y01", "a1", "q")[0] == 2
+    assert run("order", f, "y00", "z0", "p")[0] == 0
+    assert run("order", f, "w01", "a3", "p")[0] == 0
+    assert run("order", f, "y02", "a1", "p")[0] == 2
+
+
+def test_order_cli_without_round_y_unchanged(tmp_path, tasks):
+    t2 = {k: v for k, v in tasks.items() if k != "round_y"}
+    f = tmp_path / "tasks.json"
+    f.write_text(json.dumps(t2), encoding="utf-8")
+    assert run("order", f, "y01", "a1", "p")[0] == 2
+    first = t2["order"][0]
+    assert run("order", f, *first)[0] == 0
 
 
 def test_text_cli(tasks):
@@ -1237,3 +1579,504 @@ def test_judge_text_shows_seen_names_even_when_the_pair_is_missing(st, tasks):
     assert j["짝없음"] is True and j["이름본것"] == ["r01"]
     txt = st.judge_text(tasks, {"c1": j})
     assert "짝없음" in txt and "이름본것" in txt and "r01" in txt
+
+
+# --- Task 7: after (귀띔 뒤에 한 일) ---
+
+def hook_ev(subtype, event, **out):
+    e = {"type": "system", "subtype": subtype, "hook_event": event}
+    e.update(out)
+    return e
+
+
+BLOCK_OUT = '{"decision":"block","reason":"x"}'
+
+
+def test_after_counts_stop_block(st):
+    ev1 = [tool("Write", file_path="/w/a.py"),
+           hook_ev("hook_started", "Stop"),
+           hook_ev("hook_response", "Stop", stdout=BLOCK_OUT),
+           tool("Bash", command="ls"),
+           tool("Skill", skill="devkit:check"),
+           result(result="끝내기 전 점검:\n…")]
+    a = st.after_of({}, ev1, [])
+    assert a["hook"] == {"started": 1, "responses": 1, "interjections": 1}
+    assert a["after"] == [{"turn": "t1", "after_n": 1, "next": [2, 3]}]
+    assert a["check_read"] is True
+    assert a["check_line"] == {"t1": True, "t2": False}
+    assert a["missing_stage"] == 0
+    assert a["events_seen"] == {"hook_started:Stop": 1, "hook_response:Stop": 1}
+
+
+def test_after_ignores_other_events_and_non_block(st):
+    ev1 = [hook_ev("hook_response", "PreToolUse", stdout=BLOCK_OUT),
+           hook_ev("hook_response", "Stop", stdout=""),
+           hook_ev("hook_response", "Stop", stdout="not json"),
+           hook_ev("hook_response", "Stop", stdout='{"decision":"approve"}')]
+    a = st.after_of({}, ev1, [])
+    assert a["hook"]["interjections"] == 0
+    assert a["after"] == []
+    assert a["events_seen"] == {"hook_response:PreToolUse": 1, "hook_response:Stop": 3}
+
+
+def test_after_hook_keys_from_config(st):
+    cfg = {"hook_y": {"event_key": "hook_name", "event": "Stop:end", "out_keys": ["output"]}}
+    ev1 = [{"type": "system", "subtype": "hook_started", "hook_name": "Stop:end"},
+           {"type": "system", "subtype": "hook_response", "hook_name": "Stop:end", "output": ' ' + BLOCK_OUT + '\n'},
+           {"type": "system", "subtype": "hook_response", "hook_name": "Stop:end", "stdout": BLOCK_OUT},
+           hook_ev("hook_response", "Stop", stdout=BLOCK_OUT)]
+    a = st.after_of(cfg, ev1, [])
+    assert a["hook"] == {"started": 1, "responses": 2, "interjections": 1}
+    assert a["events_seen"] == {"hook_started:Stop:end": 1, "hook_response:Stop:end": 2, "hook_response:None": 1}
+    assert st.hook_cfg({})["decision"] == "block" and st.hook_cfg(cfg)["event"] == "Stop:end"
+    assert st.hook_cfg(cfg)["type"] == "system"
+
+
+def test_after_tool_numbers_span_turns(st):
+    ev1 = [tool("Read", file_path="/w/x"), tool("Edit", file_path="/w/y"), result(result="ok")]
+    ev2 = [tool("Bash", command="pytest -q"), result(result="ok")]
+    a = st.after_of({}, ev1, ev2)
+    assert [(t["n"], t["turn"], t["name"], t["what"]) for t in a["tools"]] == [
+        (1, "t1", "Read", "/w/x"), (2, "t1", "Edit", "/w/y"), (3, "t2", "Bash", "pytest -q")]
+    b = st.after_of({}, [tool("Skill", skill="devkit:find"), tool("NotebookEdit", notebook_path="/w/n.ipynb"),
+                         tool("Glob", pattern="*")], [])
+    assert [t["what"] for t in b["tools"]] == ["devkit:find", "/w/n.ipynb", ""]
+
+
+def test_after_missing_stage_count(st):
+    ev1 = [result(result="없는 단계: x — 한 장대로 했다")]
+    ev2 = [result(result="끝")]
+    assert st.after_of({}, ev1, ev2)["missing_stage"] == 1
+    assert st.after_of({}, ev1, ev1)["missing_stage"] == 2
+    assert st.after_of({}, [], [])["missing_stage"] == 0
+
+
+def test_after_cli_writes_only_given_dir(st, tmp_path):
+    t1 = [tool("Write", file_path="/w/a.py"), hook_ev("hook_response", "Stop", stdout=BLOCK_OUT),
+          tool("Skill", skill="devkit:check"), result(result="끝내기 전 점검:\n…")]
+    for d in ("kit09", "out-done/ruler2", "out-done/kit09/..", "other", "out-done"):
+        p = tmp_path / d
+        p.mkdir(parents=True, exist_ok=True)
+    for d in ("kit09", "out-done/ruler2", "other", "out-done"):
+        write(tmp_path / d / "y01.t1.jsonl", t1)
+    assert st.cmd_after({}, str(tmp_path / "kit09"), "y01") == 0
+    got = json.loads((tmp_path / "kit09" / "y01.after.json").read_text(encoding="utf-8"))
+    assert got["run"] == "y01" and got["hook"]["interjections"] == 1 and got["check_read"] is True
+    assert got["after"] == [{"turn": "t1", "after_n": 1, "next": [2]}]
+    (tmp_path / "kit09" / "y01.after.json").unlink()
+    assert st.cmd_after({}, str(tmp_path / "kit09") + "/", "y01") == 0
+    assert (tmp_path / "kit09" / "y01.after.json").exists()
+    (tmp_path / "kit09" / "y01.after.json").unlink()
+    for d in ("out-done", "out-done/ruler2", "out-done/kit09/..", "other"):
+        assert st.cmd_after({}, str(tmp_path / d), "y01") == 2
+    assert not list(tmp_path.rglob("*.after.json"))
+    assert st.cmd_after({}, str(tmp_path / "kit09"), "y02") == 2
+    assert st.cmd_after({}, str(tmp_path / "kit09"), "../y01") == 2
+    assert not list(tmp_path.rglob("*.after.json"))
+    # t2가 없어도 되고, 있으면 쓴다
+    write(tmp_path / "kit09" / "y03.t1.jsonl", [tool("Bash", command="ls")])
+    write(tmp_path / "kit09" / "y03.t2.jsonl", [tool("Bash", command="pwd")])
+    assert st.cmd_after({}, str(tmp_path / "kit09"), "y03") == 0
+    got = json.loads((tmp_path / "kit09" / "y03.after.json").read_text(encoding="utf-8"))
+    assert [t["turn"] for t in got["tools"]] == ["t1", "t2"]
+
+
+def test_after_cli_line_and_usage(tmp_path):
+    d = tmp_path / "kit09"
+    d.mkdir()
+    write(d / "y01.t1.jsonl", [tool("Skill", skill="devkit:check"), hook_ev("hook_started", "Stop"),
+                               hook_ev("hook_response", "Stop", stdout=BLOCK_OUT), result(result="끝내기 전 점검: 됨")])
+    rc, out = run("after", M / "stage" / "tasks.json", d, "y01")
+    assert rc == 0
+    assert out.strip() == "y01 끼어듦=1 시작=1 점검읽음=1 점검줄=1/0 없는단계=0 도구=1"
+    rc, out = run("after", M / "stage" / "tasks.json", tmp_path / "other", "y01")
+    assert rc == 2 and "kit09 폴더에만 씀" in out
+
+
+# --- Task 8: compare (앞·뒤 견주기와 판정) ---
+
+def wj(path, obj):
+    path.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+
+
+Y_ROWS = [["w01", "a3", "q"], ["w02", "a3", "q"], ["w03", "b3", "q"], ["w04", "b3", "q"],
+          ["y01", "a1", "q"], ["y02", "a1", "q"], ["y03", "a2", "q"], ["y04", "a2", "q"],
+          ["y05", "b1", "q"], ["y06", "b1", "q"], ["y07", "b2", "q"], ["y08", "b2", "q"],
+          ["y09", "c1", "q"], ["y10", "c1", "q"], ["y11", "c2", "q"], ["y12", "c2", "q"],
+          ["y13", "a3", "q"], ["y14", "a3", "q"], ["y15", "b3", "q"], ["y16", "b3", "q"],
+          ["y00", "z0", "q", "a1"]]
+
+
+def fake_y_cfg(tasks):
+    return {"kinds": tasks["kinds"], "void_exits": tasks["void_exits"],
+            "tasks": {t: {"stage": t[0], "helpers": dict((tasks["tasks"].get(t) or {}).get("helpers") or {})}
+                      for t in ("a1", "a2", "a3", "b1", "b2", "b3", "c1", "c2", "z0")},
+            "round_y": [list(r) for r in Y_ROWS],
+            "y_before": {"t3_scene": "Q1", "h2_scene": "U9", "g4": {"c1": {}, "c2": {}},
+                         "cost": {t: "1.00" for t in ("a1", "a2", "b1", "b2", "c1", "c2")}}}
+
+
+def _y_kinds(tasks, run, task):
+    stage = task[0]
+    if stage == "a":
+        return {"덧붙임": 2 if run[0] == "w" else (1 if task == "a3" else 0)}
+    if stage not in "bc":
+        return {}
+    k = {n: 0 for n in tasks["kinds"][stage]}
+    if not (tasks["tasks"].get(task) or {}).get("helpers"):
+        k.pop("또만듦", None)                 # 세는 쪽(machine_kinds)도 도우미가 없는 일감에는 이 종류를 안 쓴다
+    if task == "b2":
+        k["장면안됨"] = 2
+    if task == "b3":
+        k["장면안됨"] = 2 if run[0] == "w" else 1
+    return k
+
+
+def y_world(tmp_path, tasks, val=None, chk=None, after=None, walk=None, ran=None, prior=None, cost=None, extra=None, with_ran=True, drop=()):
+    """가짜 kit09 폴더. val={실행: {종류: 값}} · chk={실행: {열쇠: 값} 또는 None(.check 없음)} · after={실행: {…}}."""
+    val, chk, after, walk, ran, cost = val or {}, chk or {}, after or {}, walk or {}, ran or {}, cost or {}
+    cfg = fake_y_cfg(tasks)
+    cfg["round_y"] += [list(r) for r in (extra or [])]
+    cfg["round_y"] = [r for r in cfg["round_y"] if r[0] not in drop]
+    out = tmp_path / "kit09"
+    out.mkdir(parents=True)
+    eye, key, count, ranfile = {}, {}, {}, {}
+    for row in cfg["round_y"]:
+        run, task, arm = row[:3]
+        wj(out / (run + ".json"), {"run": run, "task": task, "arm": arm, "cost": cost.get(run, "1.00")})
+        if chk.get(run, {}) is not None:
+            c = {"exit": "0", "run": run, "task": task, "arm": arm, "t2": "sent", "secs": "5"}
+            c.update(chk.get(run, {}))
+            (out / (run + ".check")).write_text("".join("%s=%s\n" % kv for kv in c.items()), encoding="utf-8")
+        if task[0] == "b" and walk.get(run, {}) is not None:
+            w = {"Q1": True, "U9": True}
+            w.update(walk.get(run, {}))
+            wj(out / (run + ".walk.json"), w)
+        if run[0] == "y":
+            a = {"run": run, "hook": {"started": 1, "responses": 1, "interjections": 1}, "events_seen": {}, "check_read": True,
+                 "check_line": {"t1": True, "t2": True}, "missing_stage": 0, "tools": [], "after": []}
+            a.update(after.get(run, {}))
+            wj(out / (run + ".after.json"), a)
+        if task != "z0":
+            n = count.get(task, 0)
+            count[task] = n + 1
+            letter = chr(65 + n)
+            kinds = _y_kinds(tasks, run, task)
+            kinds.update(val.get(run, {}))
+            eye.setdefault(task, {})[letter] = kinds
+            key.setdefault(task, {})[letter] = run
+        if task in ("a1", "a2", "a3"):
+            ranfile[run] = {"켜봄": ran.get(run, run[0] == "y"), "근거": [1]}
+    if prior is None:
+        prior = {"a1": ("r03", 3), "a2": ("r04", 1)}
+    for task, (prun, v) in prior.items():
+        eye[task]["P"] = {"덧붙임": v}
+        key[task]["P"] = prun
+    wj(out / "eye.json", eye)
+    wj(out / "eye-key.json", key)
+    if with_ran:
+        wj(out / "ran.json", ranfile)
+    return cfg, out
+
+
+def test_compare_keep_when_two_t_and_one_h(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks)
+    c = st.compare(cfg, str(out))
+    assert [c[k]["result"] for k in ("T1", "T2", "T3", "T4")] == ["나아짐"] * 4
+    assert c["T1"]["old"] == [3, 3] and c["T1"]["new"] == [0, 0]
+    assert [c[k]["result"] for k in ("H1", "H2", "H3")] == ["나아짐"] * 3
+    assert c["G1"]["result"] == c["G2"]["result"] == c["G3"]["result"] == c["G4"]["result"] == "통과"
+    assert c["T5"]["result"] == "통과" and c["hook_none"] == [] and c["left_runs"] == [] and c["replaced"] == []
+    assert c["judgment"] == "남긴다"
+    assert st.compare_text(c)
+
+
+def test_compare_shaky_when_one_of_two(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, val={"y01": {"덧붙임": 2}, "y02": {"덧붙임": 3}})
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["new"] == [2, 3] and c["T1"]["result"] == "흔들림"
+    out2 = y_world(tmp_path / "b", tasks, val={"y01": {"덧붙임": 3}, "y02": {"덧붙임": 4}})
+    assert st.compare(*out2)["T1"]["result"] == "안나아짐"
+
+
+def test_compare_t3_needs_scene_both(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, val={"y07": {"장면안됨": 3}, "y08": {"장면안됨": 3}},
+                       walk={"y08": {"Q1": False}})
+    c = st.compare(cfg, str(out))
+    assert c["T3"]["new"] == [3, 3] and c["T3"]["result"] == "흔들림"
+    cfg, out = y_world(tmp_path / "b", tasks, val={"y07": {"장면안됨": 4}, "y08": {"장면안됨": 3}})
+    assert st.compare(cfg, str(out))["T3"]["result"] == "흔들림"
+
+
+def test_compare_eye_override(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, prior={"a1": ("r03", 2), "a2": ("r04", 0)})
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "안나아짐(눈)" and c["T2"]["result"] == "안나아짐(눈)"
+    assert c["T3"]["result"] == "나아짐"
+    cfg, out = y_world(tmp_path / "b", tasks, prior={"a1": ("r03", 3), "a2": ("r04", 1)})
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "나아짐" and c["T2"]["result"] == "나아짐"
+
+
+def test_compare_eye_guard_missing_is_unknown(st, tasks, tmp_path):
+    # 섞어 넣은 앞 실행이 눈 묶음에 없으면(또는 눈이 못 셌으면) 보호 장치를 못 본 것 — 나아짐으로 치지 않는다
+    cfg, out = y_world(tmp_path / "a", tasks, prior={})
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "모름" and c["T2"]["result"] == "모름" and c["judgment"] == "미룸(모름)"
+    cfg, out = y_world(tmp_path / "b", tasks, prior={"a1": ("r03", "?"), "a2": ("r04", 1)})
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "모름" and c["T2"]["result"] == "나아짐"
+    # 새 값이 이미 선을 못 넘으면 보호 장치와 상관없이 안나아짐
+    cfg, out = y_world(tmp_path / "c", tasks, prior={}, val={"y01": {"덧붙임": 3}, "y02": {"덧붙임": 4}})
+    assert st.compare(cfg, str(out))["T1"]["result"] == "안나아짐"
+
+
+def test_compare_cost_unknown_note(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, cost={"y01": "?"})
+    c = st.compare(cfg, str(out))
+    assert c["cost_ratio"] is None and any("돈" in n and "못" in n for n in c["notes"])
+
+
+def test_after_marks_subagent_tools(st, tasks):
+    def tu(name, inp, parent=None):
+        e = {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t", "name": name, "input": inp}]}}
+        if parent:
+            e["parent_tool_use_id"] = parent
+        return e
+    a = st.after_of(tasks, [tu("Edit", {"file_path": "/w/a.py"}), tu("Edit", {"file_path": "/w/b.py"}, parent="toolu_x")], [])
+    assert [t.get("sub", False) for t in a["tools"]] == [False, True] and "sub" not in a["tools"][0]
+
+
+def test_compare_h_dropped_when_old_zero_and_both_dropped_note(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, val={"w01": {"덧붙임": 0}, "w02": {"덧붙임": 0},
+                                             "w03": {"장면안됨": 0}, "w04": {"장면안됨": 0}})
+    c = st.compare(cfg, str(out))
+    assert c["H1"]["result"] == "뺌" and c["H2"]["result"] == "뺌"
+    assert c["judgment"] == "그 사이"
+    assert "처음 보는 일감으로는 가리지 못했다" in c["notes"]
+
+
+def test_compare_worse_h_drops(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, val={"y15": {"장면안됨": 3}, "y16": {"장면안됨": 3}})
+    c = st.compare(cfg, str(out))
+    assert c["H2"]["result"] == "나빠짐" and c["judgment"] == "뺀다"
+    cfg, out = y_world(tmp_path / "b", tasks, val={"y13": {"덧붙임": 3}, "y14": {"덧붙임": 2}})
+    c = st.compare(cfg, str(out))
+    assert c["H1"]["result"] == "나빠짐" and c["judgment"] == "뺀다"
+
+
+def test_compare_stage_only(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, val={"y13": {"덧붙임": 2}, "y14": {"덧붙임": 2}, "y15": {"장면안됨": 2}, "y16": {"장면안됨": 2}},
+                       ran={"y13": False, "y14": False})
+    c = st.compare(cfg, str(out))
+    assert [c[k]["result"] for k in ("H1", "H2")] == ["그대로", "그대로"] and c["H3"]["result"] == "안나아짐"
+    assert c["judgment"] == "이 무대에만"
+
+
+def test_compare_g3_defer(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path / "a", tasks, chk={"y01": {"exit": "11"}})
+    c = st.compare(cfg, str(out))
+    assert c["judgment"] == "미룸(G3)" and c["left_runs"] == ["y01"]
+    cfg, out = y_world(tmp_path / "b", tasks, chk={"y02": {"t2": "skip:money"}})
+    assert st.compare(cfg, str(out))["judgment"] == "미룸(G3)"
+    void = [x for x in tasks["void_exits"] if x not in (0, 11)][0]
+    cfg, out = y_world(tmp_path / "c", tasks, chk={"y03": {"exit": str(void)}})
+    c = st.compare(cfg, str(out))
+    assert c["judgment"] == "미룸(G3)" and c["G3"]["result"] == "실패"
+
+
+def test_compare_g3_exits_y_accepts_11(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path / "a", tasks, chk={"y01": {"exit": "11"}})
+    cfg["g3_exits_y"] = ["0", "11"]
+    c = st.compare(cfg, str(out))
+    assert c["G3"]["result"] == "통과" and c["left_runs"] == ["y01"] and c["judgment"] == "남긴다"
+    cfg, out = y_world(tmp_path / "b", tasks, chk={"y01": {"exit": "11", "t2": "skip:surv"}})
+    cfg["g3_exits_y"] = ["0", "11"]
+    c = st.compare(cfg, str(out))
+    assert c["judgment"] == "미룸(G3)" and c["left_runs"] == ["y01"]
+
+
+def test_compare_g3_ignores_y00(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path / "a", tasks, chk={"y00": None})
+    assert not (out / "y00.check").exists()
+    c = st.compare(cfg, str(out))
+    assert c["G3"]["result"] == "통과" and c["judgment"] == "남긴다"
+    assert "y00" not in json.dumps(c, ensure_ascii=False)
+    cfg, out = y_world(tmp_path / "b", tasks, chk={"y00": {"exit": "9"}})
+    c = st.compare(cfg, str(out))
+    assert c["G3"]["result"] == "통과" and "y00" not in json.dumps(c, ensure_ascii=False)
+
+
+def test_compare_redo_y_replaces(st, tasks, tmp_path):
+    void = [x for x in tasks["void_exits"] if x not in (0, 11)][0]
+    cfg, out = y_world(tmp_path / "a", tasks, extra=[["y21", "a2", "q"]], chk={"y03": {"exit": str(void)}},
+                       val={"y04": {"덧붙임": 0}, "y21": {"덧붙임": 5}})
+    cfg["redo_y"] = {"y03": "y21"}
+    c = st.compare(cfg, str(out))
+    assert c["replaced"] == [{"old": "y03", "new": "y21", "exit": str(void)}]
+    assert c["T2"]["new"] == [0, 5] and c["T2"]["result"] == "흔들림"
+    assert c["G3"]["result"] == "통과"
+    assert "y03" not in json.dumps({k: v for k, v in c.items() if k != "replaced"}, ensure_ascii=False)
+    assert [s["run"] for s in c["side"]].count("y21") == 1 and "y03" not in [s["run"] for s in c["side"]]
+    for bad in ({"y03": "y99"}, {"y03": "y05"}, {"y99": "y21"}):
+        cfg["redo_y"] = bad
+        assert st.cmd_compare(cfg, str(out)) == 2
+        assert not (out / "compare.json").exists()
+    cfg["redo_y"] = {"y03": "y21"}
+    assert st.cmd_compare(cfg, str(out)) == 0 and (out / "compare.json").exists()
+
+
+def test_compare_hook_none_four_defer(st, tasks, tmp_path):
+    miss = {"hook": {"started": 1, "responses": 1, "interjections": 0}, "check_line": {"t1": False, "t2": False},
+            "tools": [{"n": 1, "turn": "t1", "name": "Write", "what": "/w/a.py"}]}
+    cfg, out = y_world(tmp_path / "a", tasks, after={r: miss for r in ("y01", "y02", "y03", "y04")})
+    c = st.compare(cfg, str(out))
+    assert c["hook_none"] == ["y01", "y02", "y03", "y04"] and c["judgment"] == "미룸(훅)"
+    cfg, out = y_world(tmp_path / "b", tasks, after={r: miss for r in ("y01", "y02", "y03")})
+    c = st.compare(cfg, str(out))
+    assert len(c["hook_none"]) == 3 and c["judgment"] == "남긴다"
+
+
+def test_compare_hook_none_definition(st, tasks, tmp_path):
+    def after(inter, tools, t1, t2):
+        return {"hook": {"started": 1, "responses": 1, "interjections": inter}, "check_line": {"t1": t1, "t2": t2},
+                "tools": [{"n": i + 1, "turn": tu, "name": nm, "what": w} for i, (tu, nm, w) in enumerate(tools)]}
+    cfg, out = y_world(tmp_path, tasks, after={
+        "y01": after(0, [("t1", "Write", "/w/a.py")], True, True),               # 점검 줄이 있다
+        "y02": after(0, [("t1", "Edit", "/w/.devkit/x.md")], False, False),        # .devkit 아래만
+        "y03": after(0, [], False, False),                                         # 고친 도구 없음
+        "y04": after(1, [("t1", "Write", "/w/a.py")], False, False),               # 끼어듦 있음
+        "y05": after(0, [("t1", "Write", "/w/a.py"), ("t2", "Edit", "/w/b.py")], True, False),   # t2만 줄 없음
+        "y06": after(0, [("t1", "Bash", "ls")], False, False),                     # 고치는 도구 아님
+        "y07": after(0, [("t2", "NotebookEdit", "/w/.devkit-notes/n.ipynb")], True, False)})   # 조각이 통째로 .devkit이 아님
+    c = st.compare(cfg, str(out))
+    assert c["hook_none"] == ["y05", "y07"]
+
+
+def test_compare_side_table(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, val={"y07": {"나쁜베낌": 1}}, cost={"y01": "2.00"},
+                       chk={"y02": {"exit": "11"}}, ran={"y03": False})
+    c = st.compare(cfg, str(out))
+    side = {s["run"]: s for s in c["side"]}
+    assert len(c["side"]) == 20 and "y00" not in side
+    assert side["w01"]["kit"] == "old" and side["y01"]["kit"] == "new"
+    assert side["y03"]["ran"] is False and side["y04"]["ran"] is True and side["y05"]["ran"] is None
+    assert side["y07"]["나쁜베낌"] == 1 and side["y05"]["나쁜베낌"] == 0 and side["y01"]["나쁜베낌"] is None
+    assert side["y01"]["cost"] == 2.0 and side["y01"]["cost_x"] == 2.0 and side["y04"]["cost_x"] == 1.0
+    assert side["w01"]["cost_x"] is None or side["w01"]["cost_x"] == 1.0
+    assert side["y02"]["exit"] == "11" and side["y02"]["left"] is True and side["y01"]["left"] is False
+    assert side["y01"]["t2"] == "sent" and side["y01"]["interjections"] == 1 and side["y01"]["check_read"] is True
+    assert side["y01"]["check_line"] == {"t1": True, "t2": True} and side["w01"]["interjections"] is None
+    text = st.compare_text(c)
+    assert "곁 표" in text and "y07" in text and "판정" in text
+
+
+def test_compare_ignores_runs_outside_round_y(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks)
+    wj(out / "y44.json", {"run": "y44", "task": "a1", "arm": "q", "cost": "9.00"})
+    (out / "y44.check").write_text("exit=11\nrun=y44\ntask=a1\narm=q\nt2=skip:money\n", encoding="utf-8")
+    c = st.compare(cfg, str(out))
+    assert "y44" not in json.dumps(c, ensure_ascii=False) and c["judgment"] == "남긴다"
+
+
+def test_compare_unknown_defer(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, with_ran=False)
+    c = st.compare(cfg, str(out))
+    assert c["T4"]["result"] == "모름" and c["judgment"] == "미룸(모름)"
+    cfg, out = y_world(tmp_path / "b", tasks, val={"y01": {"덧붙임": "?"}})
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "모름" and c["judgment"] == "미룸(모름)"
+    cfg, out = y_world(tmp_path / "c", tasks)
+    (out / "y02.json").unlink()
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "모름"
+
+
+def test_compare_g1_g4_lines(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path / "a", tasks, val={"y05": {"관계없는줄": 3}})
+    c = st.compare(cfg, str(out))
+    assert c["G1"]["result"] == "실패" and c["judgment"] == "뺀다"
+    cfg, out = y_world(tmp_path / "b", tasks, val={"y05": {"관계없는줄": 2, "나쁜베낌": 1}, "y06": {"관계없는줄": 2}})
+    assert st.compare(cfg, str(out))["G1"]["result"] == "통과"
+    kind = tasks["kinds"]["c"][0]
+    cfg, out = y_world(tmp_path / "c", tasks, val={"y09": {kind: 1}})
+    c = st.compare(cfg, str(out))
+    assert c["G4"]["result"] == "실패" and c["judgment"] == "뺀다"
+    cfg["y_before"]["g4"]["c1"] = {kind: 1}
+    assert st.compare(cfg, str(out))["G4"]["result"] == "통과"
+
+
+def test_compare_g4_one_run_each(st, tasks, tmp_path):
+    # 진짜 차례는 큰 무대(c1·c2)를 한 번씩만 돌린다 — 그래도 G4는 판정이 난다
+    cfg, out = y_world(tmp_path / "a", tasks, drop=("y10", "y12"))
+    c = st.compare(cfg, str(out))
+    assert c["G4"]["result"] == "통과" and c["judgment"] == "남긴다"
+    kind = tasks["kinds"]["c"][0]
+    cfg, out = y_world(tmp_path / "b", tasks, drop=("y10", "y12"), val={"y11": {kind: 1}})
+    c = st.compare(cfg, str(out))
+    assert c["G4"]["result"] == "실패" and c["judgment"] == "뺀다"
+    cfg, out = y_world(tmp_path / "c", tasks, drop=("y09", "y10"))
+    assert st.compare(cfg, str(out))["G4"]["result"] == "모름"
+
+
+def test_compare_d1_and_cost_note(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path / "a", tasks)
+    c = st.compare(cfg, str(out))
+    assert c["d1"] == "남긴다" and "가볍게 하기" not in " ".join(c["notes"]) and abs(c["cost_ratio"] - 1.0) < 1e-9
+    cfg, out = y_world(tmp_path / "b", tasks, after={"y01": {"missing_stage": 1}})
+    c = st.compare(cfg, str(out))
+    assert c["T5"]["result"] == "실패" and c["d1"] == "판정을 따른다" and c["judgment"] == "남긴다"
+    cost = {r[0]: "2.50" for r in Y_ROWS if r[0][0] == "y" and r[1] != "z0"}
+    cfg, out = y_world(tmp_path / "c", tasks, cost=cost)
+    c = st.compare(cfg, str(out))
+    assert abs(c["cost_ratio"] - 2.5) < 1e-9 and any("가볍게 하기" in n for n in c["notes"])
+
+
+def test_compare_eye_reads_prior_run_from_eye_files_only(st, tasks, tmp_path):
+    cfg, out = y_world(tmp_path, tasks, prior={"a1": ("r03", 2), "a2": ("r04", 1)})
+    assert not list(out.glob("r03*")) and not list(out.glob("r04*"))
+    c = st.compare(cfg, str(out))
+    assert c["T1"]["result"] == "안나아짐(눈)" and c["T2"]["result"] == "나아짐"
+    assert "r03" not in json.dumps(c, ensure_ascii=False) and "r04" not in json.dumps(c, ensure_ascii=False)
+
+
+def test_compare_refuses_other_dirs(st, tasks, tmp_path):
+    cfg, _ = y_world(tmp_path / "ok", tasks)
+    (tmp_path / "bad" / "out-done" / "kit09").mkdir(parents=True)
+    (tmp_path / "bad" / "out-done" / "ruler2").mkdir()
+    (tmp_path / "bad" / "other").mkdir()
+    for d in ("out-done", "out-done/ruler2", "other", "out-done/kit09/.."):
+        assert st.cmd_compare(cfg, str(tmp_path / "bad" / d)) == 2
+    assert not list((tmp_path / "bad").rglob("compare.json"))
+    wj(tmp_path / "cfg.json", cfg)
+    rc, txt = run("compare", tmp_path / "cfg.json", tmp_path / "bad" / "other")
+    assert rc == 2 and "kit09" in txt
+    rc, txt = run("compare", tmp_path / "cfg.json", tmp_path / "ok" / "kit09")
+    assert rc == 0 and "남긴다" in txt
+    got = json.loads((tmp_path / "ok" / "kit09" / "compare.json").read_text(encoding="utf-8"))
+    assert got["judgment"] == "남긴다" and got["T1"]["result"] == "나아짐"
+
+
+def test_table_and_judge_text_unchanged_for_old_dirs(tmp_path):
+    out = tmp_path / "o"
+    out.mkdir()
+
+    def mj(run_, task, arm):
+        wj(out / (run_ + ".json"), {"run": run_, "task": task, "arm": arm, "rc": 0, "공": 1})
+        (out / (run_ + ".check")).write_text("exit=0\nrun=%s\ntask=%s\narm=%s\n" % (run_, task, arm), encoding="utf-8")
+
+    mj("r05", "b1", "p")
+    mj("r06", "b1", "q")
+    wj(out / "r05.walk.json", {"E1": True, "S1": False, "S2": False})
+    wj(out / "r06.walk.json", {"E1": True, "S1": True, "S2": True})
+    wj(out / "eye.json", {"b1": {"A": {"나쁜베낌": 0, "또만듦": 0, "관계없는줄": 0, "notes": []},
+                                 "B": {"나쁜베낌": 2, "또만듦": 0, "관계없는줄": 0, "notes": []}}})
+    wj(out / "eye-key.json", {"b1": {"A": "r06", "B": "r05"}})
+    rc, before_txt = run("judge", TASKS, out)
+    before = (out / "judge.json").read_text(encoding="utf-8")
+    assert rc == 0
+    mj("w01", "b1", "p")
+    mj("y01", "b1", "q")
+    wj(out / "y01.walk.json", {"E1": True, "S1": False})
+    rc, after_txt = run("judge", TASKS, out)
+    assert rc == 0 and after_txt == before_txt and (out / "judge.json").read_text(encoding="utf-8") == before

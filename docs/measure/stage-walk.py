@@ -1,5 +1,5 @@
 # stage-walk.py — 연습 무대의 준비(prep) · ② 걸어 보기(walk-b) · ③ 숨긴 시험(check-c) · ① 장면 빈칸(blank-a) · ① 시험 세기(tests-a).
-# 쓰는 법: python3 -I -B stage-walk.py <prep|walk-b|check-c|blank-a|tests-a> [--root R] [--sub <이름>(walk-b·tests-a만)] …   (실행 비트 없음 · 잠금 아래에서 부른다)
+# 쓰는 법: python3 -I -B stage-walk.py <prep|walk-b|check-c|blank-a|tests-a> [--root R] [--sub <이름>(walk-b·tests-a·check-c·blank-a만)] …   (실행 비트 없음 · 잠금 아래에서 부른다)
 # 뿌리 S는 환경 STAGE_S(없으면 tasks.json의 stage). 원본 저장소 S/src-b/repo·S/src-c/repo는 읽기만 한다
 # (log·show·diff·ls-files, 그리고 임시 색인으로 바탕 트리를 꺼내는 read-tree·checkout-index — 원본의 HEAD·색인·작업 트리는 그대로).
 # 띄우는 프로세스는 모두 start_new_session=True · 걸음마다 상한 · 끝낼 때 자기가 받은 pgid로만 killpg. 설치는 하지 않는다(prep은 명령을 찍기만).
@@ -51,7 +51,7 @@ def work_root(cfg):
 
 
 def task_of(cfg, run):
-    for key in ("order", "zero", "rerun"):
+    for key in ("order", "zero", "rerun", "round_y"):
         for row in cfg.get(key, []):
             if row and row[0] == run:
                 return row[1]
@@ -401,6 +401,47 @@ def form_pairs(body, form_id=None):
     ff.feed(body)
     ff.close()
     return ff.pairs
+
+
+class _FormHead(HTMLParser):
+    """첫 양식 하나의 머리(action·method)와, 그 안 input·textarea·select의 이름들."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.action = ""
+        self.method = "get"
+        self.names = set()
+        self._in = False
+        self._done = False
+
+    def handle_starttag(self, tag, attrs):
+        a = {k: (v if v is not None else "") for k, v in attrs}
+        if tag == "form":
+            if not self._done and not self._in:
+                self._in = True
+                self.action = a.get("action", "")
+                self.method = (a.get("method") or "get").strip().lower()
+        elif self._in and tag in ("input", "textarea", "select") and a.get("name"):
+            self.names.add(a["name"])
+
+    def handle_endtag(self, tag):
+        if tag == "form" and self._in:
+            self._in = False
+            self._done = True
+
+
+def pick_form(body, field, method="post"):
+    """화면의 양식 가운데 method가 맞고 name이 field인 칸이 든 첫 양식 → {"action", "method", "pairs"} · 없으면 None."""
+    want = (method or "get").lower()
+    starts = [m.start() for m in re.finditer(r"<form\b", body, re.I)]
+    for i, st in enumerate(starts):
+        seg = body[st:(starts[i + 1] if i + 1 < len(starts) else len(body))]
+        head = _FormHead()
+        head.feed(seg)
+        head.close()
+        if head.method == want and field in head.names:
+            return {"action": head.action, "method": head.method, "pairs": form_pairs(seg)}
+    return None
 
 
 def override(pairs, changes):
@@ -961,6 +1002,131 @@ def y_scenes(cli, res, notes):
     res["Y4"] = sidestep(y4, notes, "Y4")
 
 
+class _FormInputs(HTMLParser):
+    """한 양식 조각 안의 이름 있는 칸들: [(이름, 태그, type)] (input의 type은 소문자 · 없으면 text)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in ("input", "textarea", "select"):
+            return
+        a = {k: (v if v is not None else "") for k, v in attrs}
+        if a.get("name"):
+            self.items.append((a["name"], tag, a.get("type", "text").strip().lower() if tag == "input" else ""))
+
+
+U_OLD_FIELDS = {"name", "email", "kindle_mail", "locale", "default_language"}
+U_NOT_INPUT = {"hidden", "submit", "button", "checkbox", "radio", "file", "password"}
+U_SEEDS = [r[1] for r in SEED_ROWS]
+
+
+def me_form(body):
+    """/me 화면에서 name="email" 칸이 든 POST 양식 → (pick_form 결과, 새 칸 이름). 새 칸을 하나로 못 좁히면 WalkError."""
+    starts = [m.start() for m in re.finditer(r"<form\b", body, re.I)]
+    for i, st_ in enumerate(starts):
+        seg = body[st_:(starts[i + 1] if i + 1 < len(starts) else len(body))]
+        end = re.search(r"</form\s*>", seg, re.I)
+        if end:
+            seg = seg[:end.end()]                    # 양식이 닫힌 뒤의 칸은 그 양식의 칸이 아니다
+        form = pick_form(seg, "email")
+        if form is None:
+            continue
+        fi = _FormInputs()
+        fi.feed(seg)
+        fi.close()
+        cands = []
+        for name, tag, typ in fi.items:
+            if name in U_OLD_FIELDS or name in cands:
+                continue
+            if tag == "input" and typ in U_NOT_INPUT:
+                continue
+            cands.append(name)
+        if len(cands) > 1:
+            cands = [n for n in cands if "page" in n.lower()]
+        if len(cands) != 1:
+            raise WalkError("/me 양식의 새 칸을 하나로 못 고름(후보 %d)" % len(cands))
+        return form, cands[0]
+    raise WalkError("/me 화면에 email 칸이 든 POST 양식이 없음")
+
+
+def u_scenes(cli, libdb, res, notes):
+    field = []
+
+    def u1():
+        st, _, body = cli.get("/me")
+        if st != 200:
+            raise WalkError("GET /me %s" % st)
+        field.append(me_form(body)[1])
+        return True
+
+    def save(value):
+        st, _, body = cli.get("/me")
+        if st != 200:
+            raise WalkError("저장 앞 GET /me %s" % st)
+        form, name = me_form(body)
+        if name != field[0]:
+            raise WalkError("저장 앞 화면의 새 칸이 달라짐")
+        st, _, _ = cli.post("/me", override(form["pairs"], {name: value}))
+        if st >= 500:
+            raise WalkError("저장 응답 %s" % st)
+
+    def home():
+        st, _, body = cli.get("/")
+        if st != 200:
+            raise WalkError("GET / %s" % st)
+        return body
+
+    def seen(body):
+        band_off = cut_random(body)
+        return [t for t in U_SEEDS if t in band_off]
+
+    def u2():
+        save("2")
+        body = home()
+        got = seen(body)
+        if len(got) != 2:
+            raise WalkError("씨앗 제목 %d개" % len(got))
+        if not any(url_path(h).endswith("/page/2") for h, _t in _links(body)):
+            raise WalkError("/page/2 링크 없음")
+        return True
+
+    def u3():
+        save("")
+        got = seen(home())
+        if len(got) != len(U_SEEDS):
+            raise WalkError("씨앗 제목 %d개" % len(got))
+        return True
+
+    def u4():
+        save("1")
+        st, _, body = cli.get("/publisher")
+        if st != 200:
+            raise WalkError("GET /publisher %s" % st)
+        href = next((h for h, t in _links(body) if "North Press" in t), None)
+        if href is None:
+            raise WalkError("North Press 링크 없음")
+        p = urllib.parse.urlsplit(href)
+        st, _, page = cli.get(p.path + ("?" + p.query if p.query else ""))
+        if st != 200:
+            raise WalkError("출판사 쪽 %s" % st)
+        got = [t for t in ("Sea Song", "Mountain Path") if t in cut_random(page)]
+        if len(got) != 1:
+            raise WalkError("두 책 가운데 %d개" % len(got))
+        return True
+
+    res["U1"] = sidestep(u1, notes, "U1")
+    if not res["U1"]:
+        for k in ("U2", "U3", "U4"):
+            res[k] = False
+        notes["U"] = "U1이 안 돼 U2~U4를 못 걸음"
+        return
+    res["U2"] = sidestep(u2, notes, "U2")
+    res["U3"] = sidestep(u3, notes, "U3")
+    res["U4"] = sidestep(u4, notes, "U4")
+
+
 # ---------- prep ----------
 
 def src_repo(S, task):
@@ -1110,10 +1276,14 @@ def walk_port(cfg, run, base):
     pc = cfg["ports"]
     if base:
         return pc["base"][base]
-    m = re.match(r"^([rxvz])(\d+)$", run)
+    m = re.match(r"^([rxvzwy])(\d+)$", run)
     if not m:
         raise WalkError("걸어 보기 포트를 못 정함: %s" % run)
-    off = {"r": 0, "z": 60, "x": 20, "v": 40}[m.group(1)]
+    if m.group(1) == "y" and not 0 <= int(m.group(2)) <= 19:
+        raise WalkError("포트 범위 밖: %s" % run)
+    if m.group(1) == "w" and not 1 <= int(m.group(2)) <= 15:
+        raise WalkError("포트 범위 밖: %s" % run)
+    off = {"r": 0, "z": 60, "x": 20, "v": 40, "y": 70, "w": 24}[m.group(1)]
     p = pc["walk_base"] + off + int(m.group(2))
     if p >= pc["walk_base"] + pc["walk_range"]:
         raise WalkError("포트 범위 밖: %d" % p)
@@ -1122,10 +1292,11 @@ def walk_port(cfg, run, base):
 
 def cmd_walk_b(cfg, S, R, run, base, sub=None):
     task = base or task_of(cfg, run)
-    if task not in ("b1", "b2"):
+    if task not in ("b1", "b2", "b3"):
         raise WalkError("b 일감이 아님: %s" % (run or base))
     key = "base-" + base if base else run
     result_path = walk_json_path(R, key, sub)
+    check_y_sub(run, base, sub)
     if not base:
         check_first_ruler_open(R, run, sub)
     port = walk_port(cfg, run, base)
@@ -1189,6 +1360,8 @@ def cmd_walk_b(cfg, S, R, run, base, sub=None):
                 e_scenes(cli, libdb, res, notes)
                 if task == "b1":
                     s_scenes(cli, libdb, res, notes)
+                elif task == "b3":
+                    u_scenes(cli, libdb, res, notes)
                 else:
                     y_scenes(cli, res, notes)
         finally:
@@ -1289,7 +1462,8 @@ def safe_check(py, copy, values, cap):
     return bool(got) and all(got), ""
 
 
-def cmd_check_c(cfg, S, R, run, base, with_fix):
+def cmd_check_c(cfg, S, R, run, base, with_fix, sub=None):
+    check_y_sub(run, base, sub)
     task = base or task_of(cfg, run)
     if task not in ("c1", "c2"):
         raise WalkError("c 일감이 아님: %s" % (run or base))
@@ -1305,7 +1479,7 @@ def cmd_check_c(cfg, S, R, run, base, with_fix):
     if not os.path.isfile(py):
         raise WalkError("venv-c 없음: %s" % py)
     root = os.path.join(R, "walk")
-    d = os.path.join(root, key)
+    d = os.path.join(root, (sub + "-" if sub is not None else "") + key)
     if os.path.lexists(d):
         rm_tree(d, root)
     os.makedirs(d)
@@ -1340,7 +1514,7 @@ def cmd_check_c(cfg, S, R, run, base, with_fix):
         obj["safe_different"] = ok
         if note:
             obj["safe_note"] = note
-    write_json(os.path.join(R, "out-done", key + ".hidden.json"), obj)
+    write_json(os.path.join(out_dir(R, sub), key + ".hidden.json"), obj)
     for step in ("part_before", "hidden", "part_after"):
         r = obj[step]
         print("%s ran=%d ok=%s failures=%d errors=%d failed=%s" % (step, r["ran"], r["ok"], r["failures"], r["errors"], r["failed"][:5]))
@@ -1350,21 +1524,32 @@ def cmd_check_c(cfg, S, R, run, base, with_fix):
 
 # ---------- blank-a · tests-a ----------
 
-A_SCENES = {"a1": ["A1", "A2", "A3", "A4", "A5"], "a2": ["P1", "P2", "P3", "P4", "P5"]}
+A_SCENES = {"a1": ["A1", "A2", "A3", "A4", "A5"], "a2": ["P1", "P2", "P3", "P4", "P5"], "a3": ["L1", "L2", "L3", "L4", "L5"]}
 A_FLAGS = ["안켜짐", "시험없음", "시험실패", "API로 걸음", "안내파일없음", "noise_committed"]
 
 
-def blank_a(cfg, R, run):
+def a_scenes(cfg, task):
+    if task in A_SCENES:
+        return A_SCENES[task]
+    t = cfg["tasks"].get(task) if task else None
+    if t and t.get("stage") == "a":
+        return list(t.get("scenes") or [])
+    raise WalkError("a 일감이 아님: %s" % task)
+
+
+def blank_a(cfg, R, run, sub=None):
+    check_y_sub(run, None, sub)
     task = task_of(cfg, run)
-    if task not in A_SCENES:
-        raise WalkError("a 일감이 아님: %s" % run)
-    path = os.path.join(R, "out-done", run + ".walk.json")
+    scenes = a_scenes(cfg, task)
+    path = walk_json_path(R, run, sub) if sub is not None else os.path.join(R, "out-done", run + ".walk.json")
     if os.path.exists(path):
         return False
-    obj = {s: None for s in A_SCENES[task]}
+    obj = {s: None for s in scenes}
     for k in A_FLAGS:
         obj[k] = None
     obj["notes"] = {}
+    if sub is not None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     write_json(path, obj)
     return True
 
@@ -1390,6 +1575,16 @@ def check_first_ruler_open(R, run, sub):
         raise WalkError("첫째 자 값은 얼렸다 — --sub ruler2 로 부른다")
 
 
+Y_SUB = "kit09"
+
+
+def check_y_sub(run, base, sub):
+    """w·y 실행과 b3 바탕은 값 폴더 kit09 로만 부른다 — 어기면 아무것도 쓰기 전에 멈춘다."""
+    if (run and re.match(r"^[wy]\d+$", run)) or base == "b3":
+        if sub != Y_SUB:
+            raise WalkError("w·y 실행과 b3 바탕은 --sub %s 로 부른다" % Y_SUB)
+
+
 def update_walk(R, run, updates, notes=None, sub=None):
     path = walk_json_path(R, run, sub)
     obj = read_json(path) or {"notes": {}}
@@ -1401,11 +1596,11 @@ def update_walk(R, run, updates, notes=None, sub=None):
 
 def cmd_tests_a(cfg, S, R, run, sub=None):
     task = task_of(cfg, run)
-    if task not in A_SCENES:
-        raise WalkError("a 일감이 아님: %s" % run)
+    a_scenes(cfg, task)
     wpath = walk_json_path(R, run, sub)
     if sub is not None and not os.path.isfile(wpath):
         raise WalkError("둘째 자 폴더에 walk.json이 없음 — 1차 파일을 먼저 복사: %s" % wpath)
+    check_y_sub(run, None, sub)
     check_first_ruler_open(R, run, sub)
     src = os.path.join(S, "done", run, "w")
     if not os.path.isdir(src):
@@ -1523,19 +1718,19 @@ def build_parser():
     p = sub.add_parser("walk-b")
     common(p)
     p.add_argument("run", nargs="?")
-    p.add_argument("--base", choices=["b1", "b2"])
+    p.add_argument("--base", choices=["b1", "b2", "b3"])
     p.add_argument("--sub", default=None)
     p = sub.add_parser("check-c")
     common(p)
     p.add_argument("run", nargs="?")
     p.add_argument("--base", choices=["c1", "c2"])
     p.add_argument("--with-fix", action="store_true")
+    p.add_argument("--sub", default=None)
     for n in ("blank-a", "tests-a"):
         p = sub.add_parser(n)
         common(p)
         p.add_argument("run")
-        if n == "tests-a":
-            p.add_argument("--sub", default=None)
+        p.add_argument("--sub", default=None)
     return ap
 
 
@@ -1544,6 +1739,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if getattr(a, "sub", None) is not None and not SUB_RE.fullmatch(a.sub):
         ap.error("--sub는 [a-z0-9]+만")
+    if a.cmd in ("blank-a", "check-c") and getattr(a, "sub", None) not in (None, Y_SUB):
+        ap.error("%s의 --sub는 %s만" % (a.cmd, Y_SUB))
     if a.cmd in ("walk-b", "check-c"):
         if bool(a.run) == bool(a.base):
             ap.error("%s는 <run> 또는 --base 중 하나만" % a.cmd)
@@ -1558,10 +1755,10 @@ def main(argv=None):
         if a.cmd == "walk-b":
             return cmd_walk_b(cfg, S, R, a.run, a.base, sub=a.sub)
         if a.cmd == "check-c":
-            return cmd_check_c(cfg, S, R, a.run, a.base, a.with_fix)
+            return cmd_check_c(cfg, S, R, a.run, a.base, a.with_fix, sub=a.sub)
         if a.cmd == "blank-a":
-            made = blank_a(cfg, R, a.run)
-            print("만듦: %s/out-done/%s.walk.json" % (R, a.run) if made else "이미 있음 — 그대로 둠")
+            made = blank_a(cfg, R, a.run, sub=a.sub)
+            print("만듦: %s" % (walk_json_path(R, a.run, a.sub) if a.sub is not None else "%s/out-done/%s.walk.json" % (R, a.run)) if made else "이미 있음 — 그대로 둠")
             return 0
         if a.cmd == "tests-a":
             return cmd_tests_a(cfg, S, R, a.run, sub=a.sub)

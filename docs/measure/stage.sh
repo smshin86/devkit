@@ -1,13 +1,13 @@
 #!/bin/bash
 # 부르는 꼴: bash stage.sh <…> — 셔뱅은 있어도 실행 비트는 없고(drvfs는 비트를 못 가림) 늘 bash로 부른다. 안의 stage.py는 늘 python3 -I -B로 부른다.
 # stage.sh <run> <task> <arm> — 연습 무대 한 번. 부탁 글(첫 턴)과 답 글(둘째 턴)을 새 사본에서 같은 대화로 보내고, 뒤에 검사·끝 커밋·세기를 한다.
-# run: r01~r12(본 차례) · z01~z07(0번 걸음 · z06·z07은 예비) · vNN(무효를 메움) · xNN(다시 돌리기). task: a1 a2 b1 b2 c1 c2 z0. arm: p(켬) · q(끔).
+# run: r01~r12(본 차례) · z01~z07(0번 걸음 · z06·z07은 예비) · vNN(무효를 메움) · xNN(다시 돌리기) · wNN(옛 꾸러미로 처음 보는 일감) · yNN(새 꾸러미 · y00은 작은 확인). task: a1 a2 a3 b1 b2 b3 c1 c2 z0. arm: p(켬) · q(끔).
 # 따로 부르기: stage.sh seal · stage.sh unseal(봉한 뿌리의 아래 폴더 chmod) · stage.sh kitsha [폴더](꾸러미 트리 sha).
 # 뿌리: S(봉한 뿌리 — STAGE_S, 기본 /home/ssmge/zzz-devkit-stage) · X(AI가 보는 뿌리 — STAGE_X, 기본 /home/ssmge/zzz-w).
-# 돈은 S/out/stage.cost(x 실행은 stage-x.cost) 한 줄씩 스스로 적는다. 세는 것은 stage.py가 한다. 끝 값 표는 계획 5-8절과 19절.
+# 돈은 S/out/stage.cost(x 실행은 stage-x.cost · w·y 실행은 stage-y.cost) 한 줄씩 스스로 적는다. 세는 것은 stage.py가 한다. 끝 값 표는 계획 5-8절과 19절.
 # 잠금: stage.sh <run> …은 stage-locked.sh가 내보내는 STAGE_LOCKED=<S>/run.lock 표시가 없으면 9. seal·unseal은 그 잠금의 flock이 잡혀 있으면(도는 실행) 9.
 # 봉하기는 첫 턴 앞에 한 번, 풀기는 둘째 턴 뒤(또는 둘째 턴을 안 보내기로 한 뒤)에 한 번뿐이다 — 사이에 풀지 않는다. 풀기 전에 남은 프로세스(cwd가 사본 아래이거나 환경에 이번 TMPDIR 표시가 든 것)를 끄고, 그래도 남으면 안 풀고 17.
-# 장부(S/out/stage.cost · stage-x.cost)는 S/out-done/<이름>.mirror에 한 줄씩 따로 적는다(턴 동안은 out-done이 봉해져 있어 풀린 뒤에 적음) — 시작할 때 둘이 다르면 4. 통제 파일 이상으로 4가 되면 S/out-done/STOP을 남기고, 그 표시가 있으면 다음 실행은 4(사람이 보고 지운다).
+# 장부(S/out/stage.cost · stage-x.cost · stage-y.cost)는 S/out-done/<이름>.mirror에 한 줄씩 따로 적는다(턴 동안은 out-done이 봉해져 있어 풀린 뒤에 적음) — 시작할 때 둘이 다르면 4. 통제 파일 이상으로 4가 되면 S/out-done/STOP을 남기고, 그 표시가 있으면 다음 실행은 4(사람이 보고 지운다).
 # 환경 변수: STAGE_CUM=0|1(z 아닌 실행에 꼭 — 둘째 턴 돈 값이 누적이면 1, z 실행은 받은 값을 .check cost_raw1·cost_raw2에 적고 누적 여부를 모른 채 둘째 턴 값을 그대로 장부에 적음) · STAGE_OVER12=yes(합이 알림 선 이상일 때 시작 허락) · STAGE_CLAUDE(실행 파일 절대 경로 — 시험용) · STAGE_TASKS(tasks.json 길 — 시험용).
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 T=${STAGE_TASKS:-$HERE/stage/tasks.json}
@@ -108,7 +108,7 @@ scan_run() {
 # 따로 부르는 unseal 앞 검사: S/out에 지난 실행의 <run>.* 파일이 남았고 X/run 아래 사본의 프로세스가 살아 있으면 9(잠금 폴더가 없어도)
 standalone_guard() {
   local f r have=0 live=()
-  for f in "$O"/[rzxv][0-9][0-9].*; do [ -e "$f" ] && have=1; done
+  for f in "$O"/[rzxvwy][0-9][0-9].*; do [ -e "$f" ] && have=1; done
   [ "$have" = 1 ] || return 0
   scan_anc
   for r in "${X:?}"/run/*; do
@@ -137,8 +137,8 @@ esac
 
 RUN=${1-}; TASK=${2-}; ARM=${3-}
 [ $# -eq 3 ] || { echo "인자 틀림: <run> <task> <arm> 셋이 있어야 함(받은 수 $#)"; exit 9; }
-[[ $RUN =~ ^[rzxv][0-9]{2}$ ]] || { echo "인자 틀림: run은 r·z·x·v 글자와 숫자 둘"; exit 9; }
-case "$TASK" in a1|a2|b1|b2|c1|c2|z0) ;; *) echo "인자 틀림: task는 a1 a2 b1 b2 c1 c2 z0"; exit 9 ;; esac
+[[ $RUN =~ ^[rzxvwy][0-9]{2}$ ]] || { echo "인자 틀림: run은 r·z·x·v·w·y 글자와 숫자 둘"; exit 9; }
+case "$TASK" in a1|a2|a3|b1|b2|b3|c1|c2|z0) ;; *) echo "인자 틀림: task는 a1 a2 a3 b1 b2 b3 c1 c2 z0"; exit 9 ;; esac
 case "$ARM" in p|q) ;; *) echo "인자 틀림: arm은 p 또는 q"; exit 9 ;; esac
 [ -e "$HOME/.devkit" ] && { echo "~/.devkit 이 이미 있음 — 멈춤"; exit 8; }
 [ -e "$HOME/.devkit-guard-off" ] && { echo "~/.devkit-guard-off 이 있음 — 훅이 꺼진 채라 재지 않음, 멈춤"; exit 8; }
@@ -156,11 +156,11 @@ run, task = sys.argv[2], sys.argv[3]
 e = task
 if task == "z0":
     e = ""
-    for r in d.get("zero", []):
+    for r in d.get("zero", []) + d.get("round_y", []):
         if r[0] == run and len(r) > 3:
             e = r[3]
 print(e)' "$T" "$RUN" "$TASK")
-case "$ENVT" in a1|a2|b1|b2|c1|c2) ;; *) echo "바탕 일감을 모름"; exit 9 ;; esac
+case "$ENVT" in a1|a2|a3|b1|b2|b3|c1|c2) ;; *) echo "바탕 일감을 모름"; exit 9 ;; esac
 if [ "$TASK" = z0 ]; then CUM='?'
 else
   [[ ${STAGE_CUM-} =~ ^[01]$ ]] || { echo "STAGE_CUM이 없거나 틀림(받은 값 [${STAGE_CUM-}]) — 0(둘째 턴 값이 그 턴만) 또는 1(누적)을 0번 걸음 결과대로 줄 것"; exit 9; }
@@ -170,11 +170,15 @@ ST=$(cfgv "tasks.$ENVT.stage"); TAR=$(cfgv "tasks.$ENVT.tar")
 case "$ST" in a|b|c) ;; *) echo "무대 글자를 모름"; exit 9 ;; esac
 # 돈 선: 본 실행은 money, x 실행은 money_rerun(없으면 9)
 CAP=$(cfgv money.turn_cap) && CAP2=$(cfgv money.turn2_budget) && MARGIN=$(cfgv money.margin) || { echo "money 열쇠가 없음"; exit 9; }
+CAPT=$CAP; CAPT2=$CAP2    # z0 덮어쓰기 앞의 턴 한도(w·y 돈 선 관계 검사용)
 if [ "$TASK" = z0 ]; then CAP=$(cfgv money.zero_cap) || exit 9; CAP2=$CAP; fi
 maxf() { awk -v a="$1" -v b="$2" 'BEGIN{printf "%.2f", (a+0>b+0)?a:b}'; }
 if [[ $RUN == x* ]]; then
   XN=$(cfgv money_rerun.need) && ALARM=$(cfgv money_rerun.alarm) && STOP=$(cfgv money_rerun.stop) || { echo "x 실행인데 money_rerun 열쇠가 없음"; exit 9; }
   TC1=$(maxf "$CAP" "$XN"); TC2=$(maxf "$CAP2" "$XN"); LEDGER=$O/stage-x.cost
+elif [[ $RUN == [wy]* ]]; then
+  ALARM=$(cfgv money_y.alert) && STOP=$(cfgv money_y.stop) || { echo "w·y 실행인데 money_y 열쇠가 없음"; exit 9; }
+  TC1=$CAP; TC2=$CAP2; LEDGER=$O/stage-y.cost
 else
   ALARM=$(cfgv money.alert) && STOP=$(cfgv money.stop) || { echo "money 열쇠가 없음"; exit 9; }
   TC1=$CAP; TC2=$CAP2; LEDGER=$O/stage.cost
@@ -182,7 +186,20 @@ fi
 for v in "$CAP" "$CAP2" "$ALARM" "$STOP" "$TC1" "$TC2" "$MARGIN"; do
   [[ $v =~ ^[0-9]{1,2}\.[0-9]{2}$ ]] || { echo "돈 값 꼴이 틀림: $v"; exit 9; }
 done
+# w·y 실행: 돈 선 관계(알림 ≤ 멈춤 − 턴 한도 − 여유)와 지문 파일을 아무것도 만들기 전에 본다
+KD=
+if [[ $RUN == [wy]* ]]; then
+  CAPM=$(maxf "$CAPT" "$CAPT2")
+  awk -v a="$ALARM" -v s="$STOP" -v c="$CAPM" -v m="$MARGIN" 'BEGIN{exit !(a+0<=s-c-m+0.0001)}' || { echo "돈 선이 어긋남: 알림 $ALARM > 멈춤 $STOP − 턴 한도 $CAPM − 여유 $MARGIN"; exit 9; }
+  SHAF=$S/out-done/kit.sha
+  [[ $RUN == y* ]] && SHAF=$S/out-done/kit-y.sha
+  WCOPY=$(awk '$1=="copy"{print $2}' "$SHAF" 2> /dev/null | head -n 1)
+  [[ $WCOPY =~ ^[0-9a-f]{64}$ ]] || { echo "지문 파일 없음(또는 copy 줄 꼴이 틀림): $SHAF"; exit 9; }
+  [ "$WCOPY" = "$(kitsha "$X/env/kit")" ] || { echo "꾸러미 사본이 지문 파일과 다름($SHAF) — 사본을 다시 만들거나 지문 파일을 사람이 맞출 것"; exit 9; }
+  KD=$S/out-done/kit09
+fi
 mkdir -p "$O" "$S/out-done" "$S/done"
+if [ -n "$KD" ]; then mkdir -p "$KD"; fi
 OP=$O/$RUN
 stopmark() { : > "$S/out-done/STOP"; }
 if [ -e "$S/out-done/STOP" ]; then
@@ -191,7 +208,7 @@ fi
 # 지난 실행이 남았으면 시작하지 않는다: X/run 아래 폴더 · S/out의 <run>.* 파일(장부·로그·잠금·seal.modes는 아님)
 LEFTOVER=()
 for f in "${X:?}"/run/*; do [ -e "$f" ] && LEFTOVER+=("$f"); done
-for f in "$O"/[rzxv][0-9][0-9].*; do [ -e "$f" ] && LEFTOVER+=("$f"); done
+for f in "$O"/[rzxvwy][0-9][0-9].*; do [ -e "$f" ] && LEFTOVER+=("$f"); done
 if [ "${#LEFTOVER[@]}" -gt 0 ]; then
   echo "지난 실행이 남아 있음 — 시작 안 함. 남은 것:"
   printf '  %s\n' "${LEFTOVER[@]}"
@@ -199,7 +216,10 @@ if [ "${#LEFTOVER[@]}" -gt 0 ]; then
     case "$f" in *.mirror-pending)
       echo "장부 줄이 미러에 못 적혀 남았음($f) — 내용:"
       awk '{print "    " $0}' "$f" 2> /dev/null
-      echo "  이 파일을 지우지 말고 out-done·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것" ;;
+      case "${f##*/}" in
+        [wy][0-9][0-9].*) echo "  이 파일을 지우지 말고 out-done/kit09·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것" ;;
+        *) echo "  이 파일을 지우지 말고 out-done·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것" ;;
+      esac ;;
     esac
   done
   echo "도는 실행이 없는지 본 뒤 사람이 보고 치우고 다시(봉한 폴더가 막혀 있으면 bash stage.sh unseal)"; exit 9
@@ -219,6 +239,7 @@ if [ -n "$NEED" ]; then
 fi
 compgen -G "$O/$RUN.*" > /dev/null && { echo "이미 돌림: $RUN"; exit 9; }
 compgen -G "$S/out-done/$RUN.*" > /dev/null && { echo "이미 돌림: $RUN"; exit 9; }
+if [ -n "$KD" ]; then compgen -G "$KD/$RUN.*" > /dev/null && { echo "이미 돌림: $RUN"; exit 9; }; fi
 [ -e "$S/done/$RUN" ] && { echo "이미 돌림: $RUN"; exit 9; }
 
 costof() {
@@ -306,7 +327,7 @@ mirror_flush() {
   printf '%s' "$MIRL" >> "$S/out-done/${LEDGER##*/}.mirror" && MIRL=
 }
 fits() { awk -v s="$1" -v n="$2" -v t="$STOP" -v m="$MARGIN" 'BEGIN{exit !(s+n<=t-m+0.0001)}'; }
-for lf in "$O/stage.cost" "$O/stage-x.cost"; do
+for lf in "$O/stage.cost" "$O/stage-x.cost" "$O/stage-y.cost"; do
   ledsame "$lf" || { echo "장부와 미러가 다름($lf ↔ $S/out-done/${lf##*/}.mirror) — 장부가 몰래 바뀌었을 수 있음, 멈춤"; stopmark; exit 4; }
 done
 if spent=$(sumof) && [[ $spent =~ ^[0-9]+\.[0-9]{2}$ ]]; then :
@@ -354,7 +375,8 @@ mkdir -p "${X:?}/run"
 R=$X/run/$OWN; W=$R/w
 mkdir "$R" || { echo "사본 자리를 못 만듦: $R"; exit 9; }
 mkdir "$W" "$R/tmp" "$R/gh" "$R/uv" "$R/nosock" "$R/pipcache" "$R/npmcache"
-printf '%s\t%s\n' "$OWN" "$RUN" >> "$S/out-done/names.tsv"
+if [ -n "$KD" ]; then printf '%s\t%s\n' "$OWN" "$RUN" >> "$KD/names.tsv"
+else printf '%s\t%s\n' "$OWN" "$RUN" >> "$S/out-done/names.tsv"; fi
 printf '[user]\n\tname = stage\n\temail = stage@invalid\n' > "$R/gitconfig"
 : > "$R/npmrc"
 GC=(-c user.name=stage -c user.email=stage@invalid -c gc.auto=0 -c maintenance.auto=false -c commit.gpgsign=false -c core.hooksPath=/dev/null -c core.fsmonitor=false)
@@ -581,7 +603,7 @@ rc1=-; rc2=-; secs1=-; secs2=-; secs=-; T2=-; rc=-; committed=-; ENDC=; LEFT1=0;
 # 턴 앞뒤 통제 파일(장부 둘 · seal.modes)의 sha·줄 수·모드. AI가 쓸 수 있는 S/out에 있어서 턴 동안 바뀌었는지 본다
 ctlsig() {
   local f
-  for f in "$O/stage.cost" "$O/stage-x.cost" "$O/seal.modes"; do
+  for f in "$O/stage.cost" "$O/stage-x.cost" "$O/stage-y.cost" "$O/seal.modes"; do
     if [ -e "$f" ]; then printf '%s %s %s\n' "$(sha256sum "$f" 2> /dev/null | cut -d' ' -f1)" "$(wc -l < "$f" 2> /dev/null)" "$(stat -c %a "$f" 2> /dev/null)"; else echo -; fi
   done
 }
@@ -610,9 +632,15 @@ write_check() {
 finish_move() {
   local f
   mv "${R:?}" "${S:?}/done/$RUN"
-  for f in "${O:?}/$RUN".*; do
-    [ -e "$f" ] && mv "$f" "${S:?}/out-done/"
-  done
+  if [ -n "${KD-}" ]; then
+    for f in "${O:?}/$RUN".*; do
+      [ -e "$f" ] && mv "$f" "${KD:?}/"
+    done
+  else
+    for f in "${O:?}/$RUN".*; do
+      [ -e "$f" ] && mv "$f" "${S:?}/out-done/"
+    done
+  fi
 }
 # 신호(TERM·INT·HUP)로 끊기면 claude를 끄고, 돈 줄(모르면 그 턴의 상한)을 적고, 남은 프로세스를 정리한 뒤 — 남은 것이 없을 때만 — 봉한 폴더를 풀고 .check를 적어 옮긴 뒤 143으로 끝낸다
 # (남은 것이 있으면 봉한 채 안내만 하고 143: 잠금도 남는다)
@@ -809,7 +837,9 @@ if [ "$ST" = b ] || [ "$ST" = c ]; then
   cmp -s "$OP.venv0" "$OP.venv1" || VENVCHG=1
 fi
 KIT1=$(kitsha "$X/env/kit")
-PREP=$(awk '$1=="copy"{print $2}' "$S/out-done/kit.sha" 2> /dev/null | head -n 1)
+PREPF=$S/out-done/kit.sha
+[[ $RUN == y* ]] && PREPF=$S/out-done/kit-y.sha
+PREP=$(awk '$1=="copy"{print $2}' "$PREPF" 2> /dev/null | head -n 1)
 if [ "$KIT0" != "$KIT1" ] || { [ -n "$PREP" ] && [ "$PREP" != "$KIT1" ]; }; then KITSTATE=changed; fi
 CH16=0
 [ "$DOT0" = "$(dotsha)" ] || CH16=1
