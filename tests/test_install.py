@@ -23,7 +23,7 @@ NOTE = install.NOTE_BEGIN + "\n" + RULES_TEXT + install.NOTE_END + "\n"
 OLD_NOTE = install.NOTE_BEGIN + "\n" + LINE1 + "\n" + install.NOTE_END + "\n"
 DESC = "일할 때 지키는 한 장(닮은 것이 하던 대로, 부탁한 것만, 끝에 사실대로)과, 큰 일일 때만 읽는 시작 안내·살펴보기(길 안내 한 장)"
 KIT_FILES = {".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "hooks/hooks.json",
-             "scripts/session_start.py", "scripts/work.py", "scripts/guard.py", "scripts/mask.py", "skills/start/SKILL.md", "skills/find/SKILL.md", "skills/find/first-guide.md", "skills/find/screen-table.md", "rules.md", "install.py", "README.md", "CREDITS.md"}
+             "scripts/session_start.py", "scripts/work.py", "scripts/guard.py", "scripts/mask.py", "scripts/finish.py", "skills/start/SKILL.md", "skills/check/SKILL.md", "skills/find/SKILL.md", "skills/find/first-guide.md", "skills/find/screen-table.md", "rules.md", "install.py", "README.md", "CREDITS.md"}
 
 
 def make_env(tmp_path, tools=("claude", "codex"), rc=0):
@@ -279,7 +279,7 @@ def test_manifests():
     def m(p):
         return json.loads((KIT / p).read_text(encoding="utf-8"))
     mk, cp = m(".claude-plugin/marketplace.json"), m(".claude-plugin/plugin.json")
-    assert mk["plugins"][0]["version"] == cp["version"] == "0.8.2"
+    assert mk["plugins"][0]["version"] == cp["version"] == "0.9.0"
     assert mk["description"] == mk["plugins"][0]["description"] == cp["description"] == DESC
     assert mk["owner"] == {"name": "devkit"}
     assert set(cp) == {"name", "description", "version"}
@@ -288,4 +288,42 @@ def test_manifests():
 def test_kit_files_exact():
     found = [p for p in KIT.rglob("*") if "__pycache__" not in p.parts]
     assert {p.relative_to(KIT).as_posix() for p in found if p.is_file()} == KIT_FILES
-    assert {p.relative_to(KIT).as_posix() for p in found if p.is_dir()} == {".claude-plugin", "hooks", "scripts", "skills", "skills/start", "skills/find"}
+    assert {p.relative_to(KIT).as_posix() for p in found if p.is_dir()} == {".claude-plugin", "hooks", "scripts", "skills", "skills/start", "skills/find", "skills/check"}
+
+
+README = KIT / "README.md"
+GLOSSARY = Path(__file__).resolve().parents[1] / "GLOSSARY.md"
+README_LINE4 = ("작은 부탁에는 한 장만 읽힌다. 한 장이 큰 일이라고 가르면 시작 안내(`start`)를 더 읽는다. 이번 판이 프로젝트 안에 만드는 것은 `.devkit/` 폴더 하나다 — "
+                "그 안에 길 안내 한 장(`.devkit/guide.md`)을 쓰고, 분석해 달라고 하면 화면 표 한 장(`.devkit/screens.md`)도 쓴다. git 프로젝트면 이 PC의 제외 목록에 한 줄이 더해진다.")
+
+
+def test_readme_finish_section():
+    lines = README.read_text(encoding="utf-8").splitlines()
+    assert lines.count("## 끝내기 전 점검") == 1
+    start = lines.index("## 끝내기 전 점검")
+    nxt = next(x for x in lines[start + 1:] if x.startswith("## "))
+    assert nxt == "## 지우기"
+    sec = lines[start:lines.index(nxt)]
+    body = "\n".join(sec)
+    for s in ("`devkit:check`", "저절로", "끄는 스위치가 없다", "Windows", "Codex", "Write·Edit", "작은 고침이어도"):
+        assert s in body, s
+    codex = [x for x in lines if x.startswith("| Codex | 끝내기 전 점검의 귀띔이 없다")]
+    assert len(codex) == 1 and "skills/check/SKILL.md" in codex[0]
+    assert len(sec) <= 10
+    assert lines[3] == README_LINE4 and "`.devkit/screens.md`" in lines[3]
+
+
+def test_readme_guard_off_line_says_finish_stays():
+    lines = README.read_text(encoding="utf-8").splitlines()
+    idx = [i for i, x in enumerate(lines) if x.startswith("- **끄는 법:**")]
+    assert len(idx) == 1 and ".devkit-guard-off" in lines[idx[0]]
+    nxt = lines[idx[0] + 1]
+    assert nxt.startswith("- ") and "끝내기 전 점검" in nxt and "꺼지지 않는다" in nxt
+
+
+def test_glossary_finish_check():
+    lines = GLOSSARY.read_text(encoding="utf-8").splitlines()
+    idx = [i for i, x in enumerate(lines) if x.startswith("**끝내기 전 점검**:")]
+    assert len(idx) == 1
+    assert lines[idx[0] + 1].strip()
+    assert any(x.startswith("_Avoid_:") for x in lines[idx[0] + 2:idx[0] + 4])

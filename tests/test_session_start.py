@@ -31,6 +31,8 @@ GUARD_CMD = '''python3 -I -S -c "__import__('runpy').run_path(__import__('sys').
 GUARD_HOOK = {"type": "command", "command": GUARD_CMD, "timeout": 10}
 MASK_CMD = GUARD_CMD.replace("guard.py", "mask.py")
 MASK_HOOK = {"type": "command", "command": MASK_CMD, "timeout": 10}
+FINISH_CMD = GUARD_CMD.replace("guard.py", "finish.py")
+FINISH_HOOK = {"type": "command", "command": FINISH_CMD, "timeout": 10}
 
 
 @pytest.fixture(autouse=True)
@@ -247,7 +249,7 @@ def test_session_start_is_python38():
 
 def test_hooks_json():
     raw = (KIT / "hooks/hooks.json").read_text(encoding="utf-8"); data = json.loads(raw)
-    assert list(data) == ["hooks"] and list(data["hooks"]) == ["SessionStart", "PreToolUse", "PostToolUse"]
+    assert list(data) == ["hooks"] and list(data["hooks"]) == ["SessionStart", "PreToolUse", "PostToolUse", "Stop"]
     (group,) = data["hooks"]["SessionStart"]; assert "matcher" not in group
     (hook,) = group["hooks"]
     assert hook == HOOK
@@ -255,6 +257,8 @@ def test_hooks_json():
     (guard,) = pre["hooks"]; assert guard == GUARD_HOOK
     (post,) = data["hooks"]["PostToolUse"]; assert set(post) == {"matcher", "hooks"} and post["matcher"] == "Bash|Read|Grep|Edit|Write|REPL"
     (mask,) = post["hooks"]; assert mask == MASK_HOOK
+    (stop,) = data["hooks"]["Stop"]; assert set(stop) == {"hooks"}
+    (fin,) = stop["hooks"]; assert fin == FINISH_HOOK
     for bad in ("||", "&&", ";", "`", "$("): assert bad not in raw
 
 

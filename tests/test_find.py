@@ -10,7 +10,8 @@ GUIDE = KIT / "skills/find/first-guide.md"
 TABLE = KIT / "skills/find/screen-table.md"
 README = KIT / "README.md"
 OLD_GUIDE = ROOT / "old/kit-0.2.0/skills/find/first-guide.md"
-KNOWN = {"start", "intake", "find", "build", "verify", "review", "wrap-up"}
+KNOWN = {p.name for p in (KIT / "skills").iterdir() if (p / "SKILL.md").is_file()}
+FIND_END = "큰 일의 길에서 온 것이면 `devkit:start`의 길로 돌아가 만든다."
 MDS = {"first-guide", "SKILL", "AGENTS", "CLAUDE", "DESIGN", "guide", "copilot-instructions", "screens", "screen-table"}
 FRAME = ["# 길 안내", "## 어디에 무엇이", "## 대표 예 하나 — 화면에서 DB까지", "## 공통 부품", "## 스타일", "## 바깥과 닿는 곳", "## 조심할 곳", "## 돌리는 법", "## 못 본 것"]
 TABLE_FRAME = ["# 화면 표", "",
@@ -42,7 +43,7 @@ def test_find_front():
     assert L[0] == "---" and L[1] == "name: find" and L[3] == "---"
     assert L[2].startswith("description: 한 장이 큰 일이라고 한 뒤에만") and ".devkit/guide.md" in L[2]
     assert L[4] == "`devkit:start`를 아직 안 읽었으면 먼저 읽는다."
-    assert L[-1] == "다음: devkit:build"
+    assert L[-1] == FIND_END
 
 
 def test_find_lines():

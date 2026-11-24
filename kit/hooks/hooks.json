@@ -34,6 +34,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I -S -c \"__import__('runpy').run_path(__import__('sys').argv[1],run_name='__main__')\" \"${CLAUDE_PLUGIN_ROOT}/scripts/finish.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
