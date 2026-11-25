@@ -279,7 +279,7 @@ def test_manifests():
     def m(p):
         return json.loads((KIT / p).read_text(encoding="utf-8"))
     mk, cp = m(".claude-plugin/marketplace.json"), m(".claude-plugin/plugin.json")
-    assert mk["plugins"][0]["version"] == cp["version"] == "0.9.0"
+    assert mk["plugins"][0]["version"] == cp["version"] == "0.9.1"
     assert mk["description"] == mk["plugins"][0]["description"] == cp["description"] == DESC
     assert mk["owner"] == {"name": "devkit"}
     assert set(cp) == {"name", "description", "version"}
@@ -327,3 +327,14 @@ def test_glossary_finish_check():
     assert len(idx) == 1
     assert lines[idx[0] + 1].strip()
     assert any(x.startswith("_Avoid_:") for x in lines[idx[0] + 2:idx[0] + 4])
+
+
+def test_readme_finish_section_says_commands_and_limits():
+    lines = README.read_text(encoding="utf-8").splitlines()
+    start = lines.index("## 끝내기 전 점검")
+    sec = lines[start:lines.index("## 지우기")]
+    body = "\n".join(sec)
+    for s in ("Write·Edit", "명령", "다른 AI", "지우기", "이름 바꾸기", "되풀이", "/mnt/"):
+        assert s in body, s
+    assert "AI가 파일 고치기 도구(Write·Edit)로 직접 고친 것만 센다" not in body
+    assert len(sec) <= 10
