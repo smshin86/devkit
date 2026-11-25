@@ -1369,6 +1369,37 @@ def _under_devkit(path):
     return '.devkit' in str(path).split('/')
 
 
+def _work_dir(cfg, chk):
+    """실행의 작업 폴더. 환경 STAGE_X가 설정의 work보다 먼저(_roots와 같은 차례). own이 없으면 None."""
+    own = chk.get('own') if isinstance(chk, dict) else None
+    if not isinstance(own, str) or not own:
+        return None
+    X = os.environ.get('STAGE_X', cfg.get('work'))
+    if not isinstance(X, str) or not X:
+        return None
+    return os.path.normpath(os.path.join(X, 'run', own, 'w'))
+
+
+def _edit_counts(t, work):
+    """고치기 도구가 작업 폴더 안을 고친 항목이면 참. work가 None이면 지금의 잣대(.devkit 아래가 아님)."""
+    if not isinstance(t, dict) or t.get('name') not in EDIT_TOOLS:
+        return False
+    what = t.get('what')
+    if not isinstance(what, str) or not what:
+        return False
+    if work is None:
+        return not _under_devkit(what)
+    if '..' in what.split('/'):
+        return False
+    p = os.path.normpath(os.path.join(work, what))
+    return _inside(p, work) and not _under_devkit(os.path.relpath(p, work))
+
+
+def _changing_tool(name):
+    """파일을 바꿀 수 있는 도구 이름(훅과 같은 규칙을 베낌)."""
+    return isinstance(name, str) and (name.lower() in ('bash', 'powershell', 'repl') or name in ('Agent', 'Task') or name.startswith('mcp__'))
+
+
 def compare(cfg, out):
     rows_y, redo = _round_y(cfg)
     used = sorted((r for r in rows_y if rows_y[r][1] != 'z0' and r not in redo), key=_run_key)
@@ -1523,18 +1554,30 @@ def compare(cfg, out):
                     fail = True
     c['G4'] = _tbl(lim, new, '모름' if unknown else ('실패' if fail else '통과'))
     # 훅 빠짐
-    none = []
+    none, shell_only = [], []
     for r in yall:
         a = afters[r]
-        if not isinstance(a, dict) or (a.get('hook') or {}).get('interjections') != 0:
+        if not isinstance(a, dict):
             continue
         cl = a.get('check_line') if isinstance(a.get('check_line'), dict) else {}
         tl = a.get('tools') if isinstance(a.get('tools'), list) else []
-        if any(any(isinstance(t, dict) and t.get('turn') == turn and t.get('name') in EDIT_TOOLS
-                   and not _under_devkit(t.get('what', '')) for t in tl) and cl.get(turn) is False
+        work = _work_dir(cfg, chks.get(r))
+        edited = any(_edit_counts(t, work) for t in tl)
+        files = _num(extra[r]['d'].get('files')) if r in extra else None
+        shell = not edited and files is not None and files >= 1
+        if shell:
+            shell_only.append(r)
+        if (a.get('hook') or {}).get('interjections') != 0:
+            continue
+        if any(any(isinstance(t, dict) and t.get('turn') == turn and _edit_counts(t, work) for t in tl) and cl.get(turn) is False
                for turn in ('t1', 't2')):
             none.append(r)
+        elif shell:
+            turns = {t.get('turn') for t in tl if isinstance(t, dict) and _changing_tool(t.get('name'))}
+            if turns and all(cl.get(turn) is False for turn in turns):
+                none.append(r)
     c['hook_none'] = none
+    c['shell_only'] = shell_only
     # 돈 · 곁 표
     cost = {r: _fnum(extra[r]['d'].get('cost')) for r in used if r in extra}
 
@@ -1605,6 +1648,7 @@ def compare_text(c):
         t = c[n]
         lines.append('- %s 앞=%s 뒤=%s → %s' % (n, json.dumps(t['old'], ensure_ascii=False), json.dumps(t['new'], ensure_ascii=False), t['result']))
     lines.append('- 훅 빠짐: %s' % (', '.join(c['hook_none']) or '없음'))
+    lines.append('- 셸로만 고침: %s' % (', '.join(c['shell_only']) or '없음'))
     lines.append('- 끝 값 11로 끝난 실행: %s' % (', '.join(c['left_runs']) or '없음'))
     if c['replaced']:
         lines.append('- 대신 돈 실행: %s' % ', '.join('%s → %s(끝 값 %s)' % (r['old'], r['new'], r['exit']) for r in c['replaced']))

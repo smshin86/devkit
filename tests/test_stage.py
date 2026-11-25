@@ -1953,6 +1953,71 @@ def test_compare_hook_none_definition(st, tasks, tmp_path):
     assert c["hook_none"] == ["y05", "y07"]
 
 
+def _set_files(out, run_, n):
+    p = out / (run_ + ".json")
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["files"] = n
+    wj(p, d)
+
+
+def _hook_after(inter, tools, t1, t2):
+    return {"hook": {"started": 1, "responses": 1, "interjections": inter}, "check_line": {"t1": t1, "t2": t2},
+            "tools": [{"n": i + 1, "turn": tu, "name": nm, "what": w} for i, (tu, nm, w) in enumerate(tools)]}
+
+
+def test_compare_hook_none_work_dir_and_shell_only(st, tasks, tmp_path, monkeypatch):
+    monkeypatch.delenv("STAGE_X", raising=False)
+    own = "abcd1234"
+    W = str(tmp_path / "X" / "run" / own / "w")
+    runs = ("y01", "y02", "y03", "y04", "y05", "y06", "y07", "y08", "y09", "y10", "y11", "y12", "y13", "y14")
+    make = ("t1", "Bash", "make")
+    cfg, out = y_world(tmp_path, tasks, chk={r: {"own": own} for r in runs}, after={
+        "y01": _hook_after(0, [("t1", "Write", W + "/a.py")], False, False),                  # 작업 폴더 아래 → 빠짐
+        "y02": _hook_after(0, [("t1", "Write", "/tmp/zz-check.py")], False, False),           # 폴더 밖 임시 파일만 · 바뀐 파일 없음 → 아님
+        "y03": _hook_after(0, [("t1", "Write", "/tmp/zz-check.py"), ("t1", "Bash", "make")], False, False),  # 셸로만 · 빠짐
+        "y04": _hook_after(0, [make], True, False),                                           # 셸로만 · 셸 쓴 턴에 줄 있음 → 빠짐 아님
+        "y05": _hook_after(1, [make], False, False),                                          # 셸로만 · 끼어듦 있음 → 빠짐 아님
+        "y06": _hook_after(0, [("t1", "Edit", W + "/.devkit/g.md"), make], False, False),     # .devkit만 + 셸 → 셸로만 · 빠짐
+        "y07": _hook_after(0, [("t1", "Write", "src/a.py")], False, False),                   # 상대 길 = 작업 폴더 아래 → 빠짐
+        "y08": _hook_after(0, [("t1", "Write", W + "/../w2/a.py")], False, False),            # .. 로 나감 → 아님
+        "y09": _hook_after(0, [make], False, False),                                          # 바뀐 파일 수를 모름 → 아님
+        "y10": _hook_after(0, [make, ("t2", "Bash", "make")], False, True),                   # 두 턴 다 셸 · 한쪽에 줄 → 세지 않음
+        "y11": _hook_after(0, [("t2", "bash", "make")], True, False),                         # 둘째 턴에만 셸 · 그 턴 줄 없음 → 빠짐
+        "y12": _hook_after(0, [("t1", "Read", "a.py")], False, False),                        # 바꿀 수 있는 도구 없음 → 세지 않음
+        "y13": _hook_after(0, [("t1", "Write", W + "/sub/../a.py")], False, False),           # .. 조각 → 고침 아님
+        "y14": _hook_after(0, [("t1", "mcp__zz__write", "x"), ("t2", "Agent", "x")], False, False)})   # 맡김 도구 · 두 턴 다 줄 없음 → 빠짐
+    cfg["work"] = str(tmp_path / "X")
+    for r_, n in (("y03", 2), ("y04", 1), ("y05", 1), ("y06", 1), ("y08", 0), ("y10", 1), ("y11", 1), ("y12", 1), ("y14", 3)):
+        _set_files(out, r_, n)
+    _set_files(out, "y09", "?")
+    c = st.compare(cfg, str(out))
+    assert c["shell_only"] == ["y03", "y04", "y05", "y06", "y10", "y11", "y12", "y14"]
+    assert c["hook_none"] == ["y01", "y03", "y06", "y07", "y11", "y14"] and c["judgment"] == "미룸(훅)"
+    text = st.compare_text(c)
+    assert "- 셸로만 고침: y03, y04, y05, y06, y10, y11, y12, y14" in text
+    assert "- 훅 빠짐: y01, y03, y06, y07, y11, y14" in text
+    for name, loud in (("Bash", True), ("PowerShell", True), ("REPL", True), ("Agent", True), ("Task", True), ("mcp__zz", True),
+                       ("agent", False), ("Read", False), ("Write", False), ("", False), (None, False)):
+        assert st._changing_tool(name) is loud, name
+
+
+def test_compare_work_dir_env_first_and_missing_own(st, tasks, tmp_path, monkeypatch):
+    own = "abcd1234"
+    monkeypatch.setenv("STAGE_X", str(tmp_path / "E"))
+    WE = str(tmp_path / "E" / "run" / own / "w")
+    WC = str(tmp_path / "X" / "run" / own / "w")
+    cfg, out = y_world(tmp_path, tasks, chk={"y01": {"own": own}, "y02": {"own": own}}, after={
+        "y01": _hook_after(0, [("t1", "Write", WE + "/a.py")], False, False),     # 환경의 뿌리 → 빠짐
+        "y02": _hook_after(0, [("t1", "Write", WC + "/a.py")], False, False),     # 설정의 뿌리는 환경에 밀림 → 아님
+        "y03": _hook_after(0, [("t1", "Write", "/w/a.py")], False, False)})       # own 없음 → 지금의 잣대 → 빠짐
+    cfg["work"] = str(tmp_path / "X")
+    c = st.compare(cfg, str(out))
+    assert c["hook_none"] == ["y01", "y03"] and c["shell_only"] == []
+    cfg2, out2 = y_world(tmp_path / "b", tasks)
+    c2 = st.compare(cfg2, str(out2))
+    assert c2["shell_only"] == [] and "- 셸로만 고침: 없음" in st.compare_text(c2)
+
+
 def test_compare_side_table(st, tasks, tmp_path):
     cfg, out = y_world(tmp_path, tasks, val={"y07": {"나쁜베낌": 1}}, cost={"y01": "2.00"},
                        chk={"y02": {"exit": "11"}}, ran={"y03": False})
