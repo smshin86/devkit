@@ -935,7 +935,7 @@ def test_flow_port_and_venv_checks_for_b(world):
     w = world
     rc, out = run_flow(w, "r05", "b1", "p")
     if rc == 15:
-        pytest.skip("이 기계에서 8083 또는 18300~18399가 지금 열려 있음")
+        pytest.skip("이 기계에서 8083 또는 18300~18499가 지금 열려 있음")
     assert rc == 9, out  # 가상 환경 없음 — 앞 검사에서 멈춤, 사본 안 만듦
     assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
     assert ledger(w) == []
@@ -2178,3 +2178,477 @@ def test_flow_r_run_unchanged_with_new_keys(world, tmp_path):
     assert (w["S"] / "out-done" / "r09.check").is_file() and (w["S"] / "out-done" / "r09.json").is_file()
     assert not (w["S"] / "out-done" / "kit09").exists()
     assert (w["S"] / "out-done" / "names.tsv").read_text().split("\n")[0].endswith("\tr09")
+
+
+# ---------- m·n 실행: 넷째 차례(옛 팔 0.9.0 · 새 팔 0.9.1) — 새 장부 stage-n.cost · 값 폴더 kit091 · 차례 지킴 ----------
+
+MN_ROWS = [["m01", "a1", "p"], ["m02", "a1", "p"], ["n00", "z0", "p", "a1"], ["n01", "a1", "p"]]
+
+
+def n_edge():
+    """관계의 꼭 경계 알림(멈춤 20.00 기준) — 진짜 설정의 돈 값에서 셈한다."""
+    from decimal import Decimal
+    m = json.loads((M / "stage" / "tasks.json").read_text(encoding="utf-8"))["money"]
+    top = max(Decimal(m["turn_cap"]), Decimal(m["turn2_budget"]))
+    return Decimal("20.00") - top - Decimal(m["margin"])
+
+
+def n_cfg(tmp_path, rows, money_n=AUTO, kit=None, pre=None):
+    """진짜 설정 사본(메모리에서 고침) + round_n + money_n(redo_n은 늘 뺌). AUTO는 관계의 꼭 경계, None은 열쇠를 뺀다. kit이 주어지면 cfg["kit"]. pre는 사본에 먼저 하는 고침(시험용)."""
+    cfgdir = tmp_path / "cfgn"
+    (cfgdir / "stage").mkdir(parents=True)
+    for n in ("stage-prompts.txt", "stage-replies.txt"):
+        shutil.copy(M / n, cfgdir / n)
+    cfg = json.loads((M / "stage" / "tasks.json").read_text(encoding="utf-8"))
+    if pre is not None:
+        pre(cfg)
+    cfg["round_n"] = rows
+    cfg.pop("money_n", None)
+    cfg.pop("redo_n", None)
+    if money_n is AUTO:
+        money_n = {"alert": "%.2f" % n_edge(), "stop": "20.00"}
+    if money_n is not None:
+        cfg["money_n"] = money_n
+    if kit is not None:
+        cfg["kit"] = str(kit)
+    tj = cfgdir / "stage" / "tasks.json"
+    tj.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    return tj
+
+
+def cfg_edit(tj, fn):
+    cfg = json.loads(tj.read_text(encoding="utf-8"))
+    fn(cfg)
+    tj.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+
+def kit_twin(w, tmp_path):
+    """world의 X/env/kit를 그대로 복사한 폴더 — turn-n의 「지금 꾸러미 지문」이 사본과 같게 한다."""
+    d = tmp_path / "kit-twin"
+    shutil.copytree(w["X"] / "env" / "kit", d)
+    return d
+
+
+def write_n_sha(w, copy=None, kit=None):
+    """<S>/out-done/kit-n.sha에 `kit <kit>` · `copy <copy>` 두 줄. 기본은 둘 다 지금 X/env/kit의 지문."""
+    now = subprocess.run(["bash", str(SH), "kitsha", str(w["X"] / "env" / "kit")], capture_output=True, text=True,
+                         env={"PATH": w["path"], "HOME": str(w["home"]), **w["env"]}).stdout.strip()
+    (w["S"] / "out-done").mkdir(parents=True, exist_ok=True)
+    (w["S"] / "out-done" / "kit-n.sha").write_text("kit %s\ncopy %s\n" % (kit or now, copy or now))
+
+
+def n_check(w, run):
+    f = w["S"] / "out-done" / "kit091" / (run + ".check")
+    assert f.is_file(), sorted(str(p) for p in (w["S"] / "out-done").rglob("*"))
+    return dict(ln.split("=", 1) for ln in f.read_text().split("\n") if "=" in ln)
+
+
+def n_nothing_made(w):
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    assert not (w["S"] / "out" / "stage-n.cost").exists()
+    assert not (w["S"] / "out-done" / "kit091").exists()
+
+
+def done_m(w):
+    kd = w["S"] / "out-done" / "kit091"
+    kd.mkdir(parents=True, exist_ok=True)
+    for r in ("m01", "m02"):
+        (kd / (r + ".check")).write_text("exit=0\n")
+        (kd / (r + ".json")).write_text("{}")
+
+
+def n_ready(w, tmp_path, rows=MN_ROWS):
+    """n 실행이 turn-n을 넘을 앞 조건을 다 갖춘다: kit-y.sha(다른 글) · kit-n.sha(지금 사본) · 끝난 m · cfg의 kit = 사본과 같은 글."""
+    tj = n_cfg(tmp_path, rows, kit=kit_twin(w, tmp_path))
+    write_sha(w, "kit-y.sha", "2" * 64)
+    write_n_sha(w)
+    done_m(w)
+    return tj
+
+
+@pytest.mark.parametrize("args", [["m1", "a1", "p"], ["n100", "a1", "p"], ["m01", "b5", "p"], ["o01", "a1", "p"]])
+def test_bad_args_exit_9_and_nothing_made_mn(roots, args):
+    home, S, X = roots
+    rc, out = sh(args, home, env_of(S, X))
+    assert rc == 9, out
+    assert not S.exists() and not X.exists()
+
+
+def test_flow_mn_needs_money_n_and_nothing_made(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS, money_n=None)
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "money_n" in out
+    n_nothing_made(w)
+    write_n_sha(w)
+    done_m(w)
+    kd = w["S"] / "out-done" / "kit091"
+    before = snap(kd)
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "money_n" in out
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    assert not (w["S"] / "out" / "stage-n.cost").exists()
+    assert snap(kd) == before
+
+
+def test_flow_mn_money_lines_out_of_relation_exit_9(world, tmp_path):
+    from decimal import Decimal
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS, money_n={"alert": "%.2f" % (n_edge() + Decimal("0.01")), "stop": "20.00"})
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "돈 선이 어긋남" in out
+    n_nothing_made(w)
+
+
+def test_flow_mn_bad_money_format_exit_9(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS, money_n={"alert": "1.5", "stop": "4.00"})
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "돈 값 꼴이 틀림" in out
+    n_nothing_made(w)
+
+
+def test_flow_mn_uses_money_n_not_money_y(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    cfg_edit(tj, lambda c: c.__setitem__("money_y", {"alert": "0.10", "stop": "20.00"}))
+    write_sha(w, "kit-y.sha")
+    seed_ledger(w["S"], "5.00 stage.old\n", "stage-y.cost")                 # money_y 알림(0.10)을 넘는 줄
+    seed_ledger(w["S"], "%.2f stage.old\n" % n_edge(), "stage-n.cost")      # money_n 알림에 닿는 줄
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 4, out
+    assert "알림 선" in out
+    (w["S"] / "out" / "stage-n.cost").write_text("")
+    (w["S"] / "out-done" / "stage-n.cost.mirror").write_text("")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})       # y 장부의 큰 합은 m 실행이 보지 않는다
+    assert rc == 0, out
+
+
+def test_flow_m_happy_path_kit091_and_own_ledger(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    write_sha(w, "kit-y.sha")
+    ky = w["S"] / "out-done" / "kit-y.sha"
+    before = (ky.read_bytes(), ky.stat().st_mtime_ns)
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    kd = w["S"] / "out-done" / "kit091"
+    assert (kd / "m01.check").is_file() and (kd / "m01.json").is_file() and (kd / "m01.t1.jsonl").is_file()
+    assert not list((w["S"] / "out-done").glob("m01.*"))
+    assert not list((w["S"] / "out").glob("m01.*"))
+    assert not list((w["S"] / "out-done" / "kit09").glob("m01.*"))
+    assert (w["S"] / "done" / "m01" / "w").is_dir()
+    assert ledger(w, "stage-n.cost") == ["0.40 stage.m01.t1", "0.50 stage.m01.t2"]
+    assert ledger(w) == [] and ledger(w, "stage-y.cost") == []
+    assert (w["S"] / "out-done" / "stage-n.cost.mirror").read_text() == "0.40 stage.m01.t1\n0.50 stage.m01.t2\n"
+    assert n_check(w, "m01")["kitsha"] == "same"
+    assert (ky.read_bytes(), ky.stat().st_mtime_ns) == before
+
+
+def test_flow_m_refused_after_copy_changed(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    write_sha(w, "kit-y.sha", "0" * 64)
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "꾸러미 사본이 지문 파일과 다름" in out
+    n_nothing_made(w)
+    write_sha(w, "kit-y.sha")
+    write_sha(w, "kit-n.sha", "1" * 64)
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "차례가 아님" in out
+    n_nothing_made(w)
+
+
+def test_flow_n_needs_new_fingerprint_and_order(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS, kit=kit_twin(w, tmp_path))
+    env = {"STAGE_TASKS": str(tj)}
+    write_sha(w, "kit-y.sha", "2" * 64)
+    done_m(w)
+    rc, out = run_flow(w, "n00", "z0", "p", env)                           # kit-n.sha 없음
+    assert rc == 9, out
+    assert "지문 파일 없음" in out
+    write_n_sha(w)
+    write_sha(w, "kit-y.sha")                                              # kit-y.sha가 같은 값 — 사본을 새로 뜨지 않았음
+    rc, out = run_flow(w, "n00", "z0", "p", env)
+    assert rc == 9, out
+    assert "차례가 아님" in out
+    write_sha(w, "kit-y.sha", "2" * 64)
+    shutil.rmtree(w["S"] / "out-done" / "kit091")                          # 끝난 m이 없음
+    (w["S"] / "out-done" / "kit091").mkdir()
+    rc, out = run_flow(w, "n00", "z0", "p", env)
+    assert rc == 9, out
+    assert "차례가 아님" in out and "kit-n.sha가 있음" in out
+    write_n_sha(w, kit="3" * 64)                                           # kit 줄 ≠ copy 줄
+    done_m(w)
+    rc, out = run_flow(w, "n00", "z0", "p", env)
+    assert rc == 9, out
+    assert "차례가 아님" in out
+    write_n_sha(w)
+    rc, out = run_flow(w, "n01", "a1", "p", env)                           # n00 앞
+    assert rc == 9, out
+    assert "차례가 아님" in out and "다음은 n00" in out
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    assert not (w["S"] / "out" / "stage-n.cost").exists()
+    rc, out = run_flow(w, "n00", "z0", "p", env)
+    assert rc == 0, out
+    assert (w["S"] / "out-done" / "kit091" / "n00.check").is_file()
+
+
+def test_flow_n00_z0_base_from_round_n(world, tmp_path):
+    w = world
+    tj = n_ready(w, tmp_path)
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert "바탕 일감을 모름" not in out
+    assert n_check(w, "n00")["task"] == "z0"
+
+
+def test_flow_n00_uses_zero_cap(world, tmp_path):
+    w = world
+    tj = n_ready(w, tmp_path)
+    cfg_edit(tj, lambda c: c["money"].__setitem__("zero_cap", "1.5"))
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "돈 값 꼴이 틀림: 1.5" in out
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    shutil.rmtree(w["S"] / "out-done" / "kit091")
+    write_sha(w, "kit-y.sha")
+    (w["S"] / "out-done" / "kit-n.sha").unlink()
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})      # z0가 아닌 실행은 zero_cap에 걸리지 않는다
+    assert rc == 0, out
+
+
+@pytest.mark.parametrize("name", ["m01.t1.jsonl", "n03.t1.jsonl"])
+def test_standalone_unseal_exit_9_with_mn_leftover(roots, name):
+    home, S, X = roots
+    (S / "sealed").mkdir(parents=True)
+    (S / "sealed").chmod(0)
+    (S / "out").mkdir()
+    (S / "out" / name).write_text("x")
+    own = X / "run" / "abcd1234"
+    (own / "w").mkdir(parents=True)
+    child = subprocess.Popen(["env", "TMPDIR=%s/tmp" % own, "sleep", "30"], start_new_session=True,
+                             cwd="/", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(0.3)
+        rc, out = sh(["unseal"], home, env_of(S, X))
+        assert rc == 9, out
+        assert str(child.pid) in out
+        assert oct((S / "sealed").stat().st_mode & 0o777) == "0o0"
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+
+
+def test_flow_m_b4_task_accepted(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, [["m01", "b4", "p"]])
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "b4", "p", {"STAGE_TASKS": str(tj)})
+    if rc == 15:
+        pytest.skip("이 기계에서 8083 또는 18300~18499가 지금 열려 있음")
+    assert rc == 9, out                                                    # 가상 환경 검사에서 멈춤
+    for bad in ("인자 틀림", "바탕 일감을 모름", "무대 글자를 모름", "차례가 아님"):
+        assert bad not in out, out
+    assert "AI용 가상 환경 없음" in out, out
+    assert ledger(w, "stage-n.cost") == []
+
+
+def test_flow_n_kit_changed_against_kit_n(world, tmp_path):
+    w = world
+    tj = n_ready(w, tmp_path)
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj), "FAKE_KIT": "1"})
+    assert rc == 0, out
+    assert n_check(w, "n00")["kitsha"] == "changed"
+
+
+def fake_with_nledger(w):
+    """있던 가짜 claude에 stage-n.cost를 고치는 갈래 하나만 더한 사본(있던 FAKE 글은 그대로)."""
+    old = '    xledger) echo "0.01 forged" >> "$FAKE_S/out/stage-x.cost" ;;\n'
+    assert old in FAKE
+    (w["bin"] / "fake-claude").write_text(FAKE.replace(old, old + '    nledger) echo "0.01 forged" >> "$FAKE_S/out/stage-n.cost" ;;\n'))
+
+
+def test_flow_mn_ledger_changed_in_t1_exit_4(world, tmp_path):
+    w = world
+    fake_with_nledger(w)
+    tj = n_cfg(tmp_path, MN_ROWS)
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj), "FAKE_TAMP": "nledger"})
+    assert rc == 4, out
+    assert n_check(w, "m01")["t2"] == "skip:ctrl"
+
+
+def test_flow_mn_leftover_and_mirror_pending_advice(world, tmp_path):
+    w = world
+    tj = n_ready(w, tmp_path)
+    env = {"STAGE_TASKS": str(tj)}
+    (w["S"] / "out").mkdir(parents=True)
+    f = w["S"] / "out" / "m01.check"
+    f.write_text("x")
+    rc, out = run_flow(w, "n00", "z0", "p", env)
+    assert rc == 9, out
+    assert "지난 실행이 남아 있음" in out
+    f.unlink()
+    f = w["S"] / "out" / "n03.mirror-pending"
+    f.write_text("0.40 stage.n03.t1\n")
+    rc, out = run_flow(w, "n00", "z0", "p", env)
+    assert rc == 9, out
+    assert "지난 실행이 남아 있음" in out and "out-done/kit091" in out
+    f.unlink()
+    rc, out = run_flow(w, "n00", "z0", "p", env)                           # 남은 파일이 없으면 끝까지 간다
+    assert rc == 0, out
+
+
+def test_flow_y_and_r_unchanged_with_round_n(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    cfg_edit(tj, lambda c: c.__setitem__("round_y", [["y01", "a1", "p"]]))
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "y01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert ledger(w, "stage-y.cost") == ["0.40 stage.y01.t1", "0.50 stage.y01.t2"]
+    assert (w["S"] / "out-done" / "kit09" / "y01.check").is_file()
+    rc, out = run_flow(w, "r09", "a2", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert ledger(w) == ["0.40 stage.r09.t1", "0.50 stage.r09.t2"]
+    assert ledger(w, "stage-n.cost") == []
+    assert (w["S"] / "out-done" / "r09.check").is_file()
+    assert not (w["S"] / "out-done" / "kit091").exists()
+
+
+# ---------- 리뷰 고침 1판: F1~F6 ----------
+
+def test_n_cfg_drops_real_redo_n_so_m01_still_runs(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS, pre=lambda c: c.__setitem__("redo_n", {"m01": "m77"}))   # 줄 묶음 밖을 가리키는 redo_n
+    assert "redo_n" not in json.loads(tj.read_text(encoding="utf-8"))
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+
+
+def test_flow_m_kitsha_same_uses_kit_y_sha_not_old_kit_sha(world, tmp_path):
+    """준비 지문 매핑: 지난 차례 지문 파일(kit.sha)은 다른 값 — m이 kit-y.sha가 아니라 kit.sha를 보면 kitsha가 changed가 된다."""
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    write_sha(w, "kit.sha", "1" * 64)
+    write_sha(w, "kit-y.sha")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert n_check(w, "m01")["kitsha"] == "same"
+
+
+def test_flow_n_kitsha_same_uses_kit_n_sha_not_kit_y_or_old(world, tmp_path):
+    """n은 kit-n.sha만 본다: kit.sha(1…)와 kit-y.sha(2…)는 다른 값 — 어느 쪽을 보든 changed가 된다."""
+    w = world
+    tj = n_ready(w, tmp_path)
+    write_sha(w, "kit.sha", "1" * 64)
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert n_check(w, "n00")["kitsha"] == "same"
+
+
+def seed_old_out_done(w):
+    """지난 차례가 남긴 파일(가짜 내용): 이름표 · 지난 장부 거울 · 지난 지문 파일 · 지난 값 폴더."""
+    od = w["S"] / "out-done"
+    seed_ledger(w["S"], "1.00 stage.old\n")
+    seed_ledger(w["S"], "2.00 stage.old\n", "stage-y.cost")
+    (od / "names.tsv").write_text("deadbeef\tr04\n")
+    write_sha(w, "kit.sha", "1" * 64)
+    (od / "r05.check").write_text("run=r05\n")
+    (od / "kit09").mkdir()
+    (od / "kit09" / "y01.check").write_text("run=y01\n")
+    (od / "ruler2").mkdir()
+    (od / "ruler2" / "r01.json").write_text("{}")
+
+
+def test_flow_m_leaves_existing_out_done_files_byte_identical_and_names_tsv(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    seed_old_out_done(w)
+    write_sha(w, "kit-y.sha")
+    od = w["S"] / "out-done"
+    skip = ("kit091", "stage-n.cost.mirror")
+    before = snap(od, skip)
+    assert {"stage.cost.mirror", "stage-y.cost.mirror", "names.tsv", "kit.sha", "kit-y.sha", "r05.check"} <= set(before)
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert snap(od, skip) == before
+    assert (od / "kit091" / "m01.check").is_file()
+    names = (od / "kit091" / "names.tsv").read_text().split("\n")
+    assert names[0].endswith("\tm01") and names[1] == ""
+
+
+def test_flow_n_leaves_existing_out_done_files_byte_identical(world, tmp_path):
+    w = world
+    tj = n_ready(w, tmp_path)
+    seed_old_out_done(w)
+    od = w["S"] / "out-done"
+    skip = ("kit091", "stage-n.cost.mirror")
+    before = snap(od, skip)
+    assert {"kit-y.sha", "kit-n.sha", "names.tsv", "kit.sha"} <= set(before)
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert snap(od, skip) == before
+    assert (od / "kit091" / "n00.check").is_file()
+
+
+def test_flow_mn_ledger_differs_from_mirror_at_start_exit_4_and_leaves_stop(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    write_sha(w, "kit-y.sha")
+    seed_ledger(w["S"], "1.00 stage.old\n", "stage-n.cost")
+    (w["S"] / "out-done" / "stage-n.cost.mirror").write_text("0.10 stage.old\n")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 4, out
+    assert "미러" in out
+    assert (w["S"] / "out-done" / "STOP").exists()
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    assert (w["S"] / "out" / "stage-n.cost").read_text() == "1.00 stage.old\n"
+    assert not list((w["S"] / "out-done" / "kit091").glob("m01.*"))
+
+
+def test_flow_mn_money_stop_uses_money_n(world, tmp_path):
+    from decimal import Decimal
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    m = json.loads(tj.read_text(encoding="utf-8"))["money"]
+    near = Decimal("20.00") - Decimal(m["margin"]) - Decimal(m["turn_cap"]) + Decimal("0.01")   # 합 + 턴 한도가 멈춤 선을 막 넘는다
+    write_sha(w, "kit-y.sha")
+    seed_ledger(w["S"], "%.2f stage.old\n" % near, "stage-n.cost")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 4, out
+    assert "돈 멈춤" in out
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+
+
+def test_flow_m_already_run_when_only_t1_file_in_kit091(world, tmp_path):
+    w = world
+    tj = n_cfg(tmp_path, MN_ROWS)
+    write_sha(w, "kit-y.sha")
+    kd = w["S"] / "out-done" / "kit091"
+    kd.mkdir()
+    (kd / "m01.t1.jsonl").write_text("x")                                    # .check 없이 파일만 남음 — turn-n(next_n)이 끊긴 실행으로 먼저 막는다(FI2)
+    before = snap(w["S"] / "out-done")
+    rc, out = run_flow(w, "m01", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "끊긴 실행" in out and ".check 없음" in out
+    assert snap(w["S"] / "out-done") == before
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    assert not (w["S"] / "done" / "m01").exists()
+    assert not (w["S"] / "out" / "stage-n.cost").exists()

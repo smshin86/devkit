@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 from fnmatch import fnmatch
 
@@ -28,6 +29,8 @@ SEPS = ('&&', '||', ';', '|', '&', ';;')
 RUN_RE = re.compile(r'^[rvxwy]\d+$')
 SCENE_RE = re.compile(r'^[A-Z]\d+$')
 Y_SUB = 'kit09'   # 새 꾸러미 판의 값 폴더 이름(길 <뿌리>/out-done/kit09/)
+N_RUN_RE = re.compile(r'[mn][0-9]{2}')   # 어디서나 fullmatch로 본다(`$`는 끝 줄바꿈 앞에서도 맞는다)
+N_SUB = 'kit091'   # 넷째 차례의 값 폴더 이름(길 <뿌리>/out-done/kit091/)
 
 
 def load_cfg(path=None):
@@ -1046,18 +1049,19 @@ def _jload(path):
         return None
 
 
-def run_names(out):
+def run_names(out, pat=RUN_RE):
     try:
         names = os.listdir(out)
     except OSError:
         return []
-    runs = sorted({n[:-5] for n in names if n.endswith('.json') and RUN_RE.match(n[:-5])})
-    return sorted(runs, key=lambda r: ('rvxwy'.index(r[0]), int(r[1:])))
+    ok = pat.match if pat is RUN_RE else pat.fullmatch
+    runs = sorted({n[:-5] for n in names if n.endswith('.json') and ok(n[:-5])})
+    return sorted(runs, key=lambda r: ('rvxwymn'.index(r[0]), int(r[1:])))
 
 
-def load_rows(cfg, out):
+def load_rows(cfg, out, pat=RUN_RE):
     rows, kinds, extra = [], {}, {}
-    for run in run_names(out):
+    for run in run_names(out, pat):
         d = _jload(os.path.join(out, run + '.json')) or {}
         task = d.get('task', '')
         if task not in cfg['tasks']:
@@ -1223,6 +1227,10 @@ def y_dir_ok(out):
     return os.path.basename(os.path.normpath(str(out))) == Y_SUB
 
 
+def n_dir_ok(out):
+    return os.path.basename(os.path.normpath(str(out))) == N_SUB
+
+
 def _is_block(e, h):
     for k in h['out_keys']:
         v = e.get(k)
@@ -1285,10 +1293,14 @@ def after_of(cfg, ev1, ev2):
 
 
 def cmd_after(cfg, out, run):
-    if not y_dir_ok(out):
+    if N_RUN_RE.fullmatch(run):
+        if not n_dir_ok(out):
+            print('%s 폴더에만 씀' % N_SUB)
+            return 2
+    elif not y_dir_ok(out):
         print('%s 폴더에만 씀' % Y_SUB)
         return 2
-    if not RUN_RE.match(run) or '\n' in run:
+    elif not RUN_RE.match(run) or '\n' in run:
         print('실행 이름이 틀림')
         return 2
     ev1 = read_turn(os.path.join(out, run + '.t1.jsonl'))
@@ -1684,6 +1696,688 @@ def cmd_compare(cfg, out):
     return 0
 
 
+# ---------- 넷째 차례 견주기(compare-n) ----------
+
+N_R = {'R1': ('b2',), 'R2': ('c1', 'c2')}
+N_H = {'H1': 'b2', 'H2': 'b4'}
+N_EYE = ('관계없는줄', '나쁜베낌', '또만듦')
+
+
+def _reached(a):
+    """훅이 끼어들었거나 점검 글이 닿았는가. 꼴이 이상하면 None(못 잼) — TypeError로 멈추지 않는다."""
+    if not isinstance(a, dict):
+        return None
+    h, cl = a.get('hook'), a.get('check_line')
+    if not isinstance(h, dict) or not isinstance(cl, dict):
+        return None
+    ij = h.get('interjections')
+    if not isinstance(ij, int) or isinstance(ij, bool):
+        return None
+    if ij >= 1:
+        return True
+    if not cl or any(not isinstance(v, bool) for v in cl.values()):
+        return None                                   # 끝 점검 줄이 비었거나 bool이 아님 — 깨진 파일은 「닿지 않음」이 아니다
+    return any(cl.values())
+
+
+def _hook_rows(cfg, runs, afters, chks, extra):
+    """훅 빠짐 · 셸로만 고침. compare의 같은 덩이와 같은 뜻을 베낀 것이다(compare는 이것을 부르지 않는다)."""
+    none, shell_only = [], []
+    for r in runs:
+        a = afters.get(r)
+        if not isinstance(a, dict):
+            continue
+        cl = a.get('check_line') if isinstance(a.get('check_line'), dict) else {}
+        tl = a.get('tools') if isinstance(a.get('tools'), list) else []
+        work = _work_dir(cfg, chks.get(r))
+        edited = any(_edit_counts(t, work) for t in tl)
+        files = _num(extra[r]['d'].get('files')) if r in extra else None
+        shell = not edited and files is not None and files >= 1
+        if shell:
+            shell_only.append(r)
+        hook = a.get('hook')
+        if (hook.get('interjections') if isinstance(hook, dict) else None) != 0:
+            continue
+        if any(any(isinstance(t, dict) and t.get('turn') == turn and _edit_counts(t, work) for t in tl) and cl.get(turn) is False
+               for turn in ('t1', 't2')):
+            none.append(r)
+        elif shell:
+            turns = {t.get('turn') for t in tl if isinstance(t, dict) and _changing_tool(t.get('name'))}
+            if turns and all(cl.get(turn) is False for turn in turns):
+                none.append(r)
+    return none, shell_only
+
+
+def _help(old, new):
+    """고친 곳이 도왔는가 · 옛 두 실행과 새 두 실행의 장면 통과로 본다."""
+    if (not isinstance(old, list) or not isinstance(new, list) or len(old) != 2 or len(new) != 2
+            or any(not isinstance(v, bool) for v in old + new)):
+        return '못 잼'
+    po, pn = sum(old), sum(new)
+    if po == 2:
+        return '뺌'
+    if pn == 2 and po < 2:
+        return '나아짐'
+    if pn > po:
+        return '흔들림'
+    if pn == po:
+        return '안나아짐'
+    return '나빠짐'
+
+
+def compare_n(cfg, out):
+    rows_n, order, redo = _round_n(cfg)
+    for key in ('g3_exits_n', 'void_exits'):
+        if not isinstance(cfg.get(key), list):
+            raise ValueError('%s가 없음' % key)
+    nb = cfg.get('n_before')
+    if not isinstance(nb, dict):
+        raise ValueError('n_before가 없음')
+
+    def sub(key):
+        v = nb.get(key)
+        return v if isinstance(v, dict) else {}
+
+    trap, eye_lim, g4_lim, cost_before = sub('trap'), sub('eye'), sub('g4'), sub('cost')
+    exits = [str(x) for x in cfg['g3_exits_n']]
+    used = [r for r in order if rows_n[r][1] != 'z0' and r not in redo]
+    new_all = [r for r in used if r[0] == 'n']
+    z0 = [r for r in order if rows_n[r][1] == 'z0' and r not in redo]
+    rows, extra = load_rows(cfg, out, N_RUN_RE)
+    kinds = {r['run']: r['kinds'] for r in rows}
+    walks, afters, chks = {}, {}, {}
+    for r in order:
+        walks[r] = _jload(os.path.join(out, r + '.walk.json'))
+        afters[r] = _jload(os.path.join(out, r + '.after.json'))
+        try:
+            chks[r] = read_check(os.path.join(out, r + '.check'))
+        except OSError:
+            chks[r] = None
+
+    def void(r):
+        return r in extra and bool(extra[r]['void_reason'])
+
+    def by(letter, tasks):
+        return [r for r in used if r[0] == letter and rows_n[r][1] in tasks and not void(r)]
+
+    def kv(r, kind):
+        return kinds.get(r, {}).get(kind)
+
+    def stage_of(r):
+        return (cfg['tasks'].get(rows_n[r][1]) or {}).get('stage')
+
+    def helpers_of(task):
+        return bool((cfg['tasks'].get(task) or {}).get('helpers'))
+
+    def short(tasks):                                 # 무효로 빠진 새 팔 실행이 있고 다시 돌리기 짝이 못 채웠는가(R3)
+        return any(void(r) for r in new_all if rows_n[r][1] in tasks)
+
+    notes, unm = [], []
+
+    def mark(name, arm):
+        e = {'name': name, 'arm': arm}
+        if e not in unm:
+            unm.append(e)
+
+    for r in used:
+        if void(r):
+            notes.append('무효 실행 뺌: %s(%s)' % (r, extra[r]['void_reason']))
+    c = {}
+    # R1 · R2 — 새 팔 실행만 본다
+    for name, tl in N_R.items():
+        runs = by('n', tl)
+        rv = [_reached(afters.get(r)) for r in runs]
+        if len(runs) != 2 or any(v is None for v in rv):
+            res = '못 잼'
+            mark(name, 'new')
+        else:
+            res = {2: '닿음', 1: '흔들림', 0: '안 닿음'}[sum(rv)]
+        c[name] = {'runs': runs, 'reached': rv, 'result': res}
+    c['reach_count'] = (None if any(c[n]['result'] == '못 잼' for n in N_R)
+                        else sum(sum(c[n]['reached']) for n in N_R))
+    # H1 · H2
+    for name, task in N_H.items():
+        tr = trap.get(task) if isinstance(trap.get(task), dict) else {}
+        scene = tr.get('scene')
+        nr = by('n', (task,))
+        new = [_scene_ok(walks.get(r), scene) for r in nr]
+        if 'old' in tr:
+            orr, old = [], list(tr['old']) if isinstance(tr['old'], list) else None
+        else:
+            orr = by('m', (task,))
+            old = [_scene_ok(walks.get(r), scene) for r in orr]
+        rv = [_reached(afters.get(r)) for r in nr]
+        res = _help(old, new)
+        if res == '나아짐':
+            hp = '닿았고 도왔다'
+        elif res == '안나아짐':
+            hp = '닿았지만 못 도왔다 — 점검 글의 일' if all(v is True for v in rv) else '안나아짐 — 안 닿은 실행 있음'
+        else:
+            hp = res
+        c[name] = {'task': task, 'scene': scene, 'old_runs': orr, 'old': old, 'new_runs': nr, 'new': new,
+                   'reached': rv, 'result': res, 'help': hp}
+    # G1 — 무효도 나쁜 것으로 센다
+    bad = []
+    for r in new_all:
+        chk = chks.get(r) or {}
+        if r not in extra:
+            bad.append('%s:행없음' % r)
+        elif extra[r]['void_reason']:
+            bad.append('%s:무효 %s' % (r, extra[r]['void_reason']))
+        elif chk.get('exit') not in exits:
+            bad.append('%s:끝 값 %s' % (r, chk.get('exit')))
+        elif chk.get('t2') != 'sent':
+            bad.append('%s:t2 %s' % (r, chk.get('t2')))
+    c['G1'] = {'limit': exits, 'new': bad, 'result': '실패' if bad else '통과'}
+
+    def verdict(name, unknown_new, unknown_old, fail):
+        if unknown_new:
+            mark(name, 'new')
+        if unknown_old:
+            mark(name, 'old')
+        if fail:
+            return '실패'                              # 잰 부분의 실패가 그 줄을 정한다 · 못 잰 부분은 unmeasured에 같이 남는다
+        return '못 잼' if (unknown_new or unknown_old) else '통과'
+
+    # G2
+    runs = [r for r in by('n', tuple(cfg['tasks'])) if stage_of(r) == 'b']
+    vals = {r: kv(r, '있던화면깨짐') for r in runs}
+    b_tasks = tuple(t for t in cfg['tasks'] if (cfg['tasks'].get(t) or {}).get('stage') == 'b')
+    c['G2'] = {'limit': 0, 'new': vals,
+               'result': verdict('G2', not runs or short(b_tasks) or any(_num(v) is None for v in vals.values()), False,
+                                 any(_num(v) is not None and v != 0 for v in vals.values()))}
+
+    def k_ok(r):                                  # b4 walk의 K 장면이 모두 bool인가(None = db를 못 읽은 장면 · H5)
+        w = walks.get(r)
+        if not isinstance(w, dict):
+            return False
+        sc = [v for a, v in w.items() if SCENE_RE.match(a) and not a.startswith('E')]
+        return bool(sc) and all(isinstance(v, bool) for v in sc)
+
+    def side_ok(runs, names):
+        return len(runs) == 2 and all(k_ok(r) for r in runs) and all(_num(kv(r, k)) is not None for r in runs for k in names)
+
+    def side_sum(runs, k):
+        return sum(kv(r, k) for r in runs)
+
+    b4_new, b4_old = by('n', ('b4',)), by('m', ('b4',))
+    # G3 — 옛 쪽과 새 쪽을 따로 본다
+    ok_new, ok_old = side_ok(b4_new, ('장면안됨',)), side_ok(b4_old, ('장면안됨',))
+    sn = side_sum(b4_new, '장면안됨') if ok_new else None
+    so = side_sum(b4_old, '장면안됨') if ok_old else None
+    c['G3'] = {'limit': so, 'new': sn,
+               'result': verdict('G3', not ok_new, not ok_old, ok_new and ok_old and sn > so)}
+    # G4
+    new4, lim4, unk, fail = [], {}, False, False
+    for task in ('c1', 'c2'):
+        runs = by('n', (task,))
+        lim4[task] = dict(g4_lim.get(task) or {}) if isinstance(g4_lim.get(task) or {}, dict) else {}
+        cn = [n for n in cfg['kinds'].get('c', []) if n != '또만듦' or helpers_of(task)]
+        if not runs or short((task,)):
+            unk = True
+        for r in runs:
+            d = {n: kv(r, n) for n in cn}
+            new4.append({'run': r, 'values': d})
+            for n, v in d.items():
+                if _num(v) is None:
+                    unk = True
+                elif v > (_num(lim4[task].get(n)) or 0):
+                    fail = True
+    c['G4'] = {'limit': lim4, 'new': new4, 'result': verdict('G4', unk, False, fail)}
+    # G5
+    new5, lim5, unk_n, unk_o, fail = {}, {}, False, False, False
+    for task in ('b1', 'b2'):
+        runs = by('n', (task,))
+        lim = eye_lim.get(task) if isinstance(eye_lim.get(task), dict) else {}
+        names = [k for k in N_EYE if k in cfg['kinds'].get('b', []) and (k != '또만듦' or helpers_of(task))]
+        lim5[task] = {k: lim.get(k) for k in names}
+        if not runs or short((task,)):
+            unk_n = True
+        for r in runs:
+            new5[r] = {k: kv(r, k) for k in names}
+            for k in names:
+                v, line = _num(kv(r, k)), _num(lim.get(k))
+                if v is None or line is None:
+                    unk_n = True
+                elif v > line:
+                    fail = True
+    names = [k for k in N_EYE if k in cfg['kinds'].get('b', []) and (k != '또만듦' or helpers_of('b4'))]
+    ok_new, ok_old = side_ok(b4_new, names), side_ok(b4_old, names)
+    lim5['b4'] = '옛 합 + 1'
+    if not ok_new:
+        unk_n = True
+    if not ok_old:
+        unk_o = True
+    new5['b4'] = {k: side_sum(b4_new, k) for k in names} if ok_new else None
+    if ok_new and ok_old:
+        fail = fail or any(side_sum(b4_new, k) > side_sum(b4_old, k) + 1 for k in names)
+    c['G5'] = {'limit': lim5, 'new': new5, 'result': verdict('G5', unk_n, unk_o, fail)}
+    # G6
+    runs = [r for r in by('n', tuple(cfg['tasks'])) if rows_n[r][1] == 'a1']
+    got, unk, fail = {}, not runs or short(('a1',)), False
+    for r in runs:
+        chk = chks.get(r) or {}
+        v = _flag(walks[r].get('안켜짐')) if isinstance(walks.get(r), dict) else '?'
+        got[r] = {'exit': chk.get('exit'), '안켜짐': v}
+        if chk.get('exit') not in exits:
+            fail = True
+        elif v == '?':
+            unk = True
+        elif v != 0:
+            fail = True
+    c['G6'] = {'limit': exits, 'new': got, 'result': verdict('G6', unk, False, fail)}
+    broken = [n for n in ('G2', 'G3', 'G4', 'G5', 'G6') if c[n]['result'] == '실패']
+    c['broken'] = broken
+    c['unmeasured'] = unm
+    # 훅 빠짐
+    live_new = [r for r in new_all if not void(r)]
+    c['hook_none'], c['shell_only'] = _hook_rows(cfg, live_new, afters, chks, extra)
+    c['hook_none_n'] = len(c['hook_none'])
+    # 돈 · 곁 표
+    cost = {r: _fnum(extra[r]['d'].get('cost')) for r in used if r in extra}
+
+    def before(r):
+        task = rows_n[r][1]
+        if task == 'b4':
+            ws = [cost.get(w) for w in b4_old]
+            return sum(ws) / len(ws) if ws and all(v is not None for v in ws) else None
+        return _fnum(cost_before.get(task))
+
+    ratio = None
+    if live_new and all(cost.get(r) is not None and before(r) for r in live_new):
+        xs = [cost[r] / before(r) for r in live_new]
+        ratio = sum(xs) / len(xs)
+        if ratio > 2:
+            notes.append('가볍게 하기')
+    else:
+        notes.append('돈을 못 견줌(값이 빠짐)')
+    c['cost_ratio'] = ratio
+    side = []
+    for r in used:
+        a = afters.get(r) if isinstance(afters.get(r), dict) else None
+        chk = chks.get(r) or {}
+        is_new = r[0] == 'n'
+        b = before(r) if is_new else None
+        cs = cost.get(r)
+        side.append({'run': r, 'task': rows_n[r][1], 'kit': 'new' if is_new else 'old', 'exit': chk.get('exit'),
+                     't2': chk.get('t2'),
+                     'interjections': a['hook'].get('interjections') if a and isinstance(a.get('hook'), dict) else None,
+                     'check_line': a.get('check_line') if a else None, 'reached': _reached(a),
+                     'hook_none': r in c['hook_none'], 'shell_only': r in c['shell_only'],
+                     'cost': cs, 'before_cost': b, 'cost_x': cs / b if cs is not None and b else None})
+    c['side'] = side
+    c['replaced'] = [{'old': o, 'new': redo[o], 'exit': (chks.get(o) or {}).get('exit')} for o in order if o in redo]
+    # 옛 팔 끝 값 밖은 판정을 바꾸지 않고 알리기만 한다
+    out_old = ['%s(%s)' % (r, (chks.get(r) or {}).get('exit') or '없음') for r in used
+               if r[0] == 'm' and not void(r) and (chks.get(r) or {}).get('exit') not in exits]
+    if out_old:
+        notes.append('옛 팔 끝 값 밖: %s' % ', '.join(out_old))
+    # 작은 확인(n00 — 대신 돈 실행이 있으면 그것) · 판정에 넣지 않는다
+    if z0:
+        r = z0[0]
+        a = afters.get(r)
+        ij = a['hook'].get('interjections') if isinstance(a, dict) and isinstance(a.get('hook'), dict) else None
+        notes.append('작은 확인 %s: 끝 값=%s · 훅 끼어듦=%s' % (r, (chks.get(r) or {}).get('exit') or '없음', '모름' if ij is None else ij))
+    # 판정
+    worse = any(c[n]['result'] == '나빠짐' for n in N_H)
+    if broken:
+        notes.append('깨진 지킴: %s' % ', '.join(broken))
+    if unm:
+        notes.append('못 잰 지킴: %s' % ', '.join('%s(%s)' % (u['name'], u['arm']) for u in unm))
+    if c['G1']['result'] == '실패':
+        j = '미룸(G1)'
+    elif broken:
+        j = '뺀다'
+    elif any(u['arm'] == 'new' for u in unm):
+        j = '미룸(못 잼)'
+    elif c['reach_count'] == 0:
+        j = '뺀다'
+        notes.append('고친 것이 일하지 않음')
+    elif c['reach_count'] <= 2 or worse:
+        j = '그 사이'
+    else:
+        j = '남긴다'
+    c['judgment'] = j
+    c['notes'] = notes
+    return c
+
+
+def compare_n_text(c):
+    dump = lambda v: json.dumps(v, ensure_ascii=False)
+    lines = ['## 넷째 차례 견주기']
+    for n in ('R1', 'R2'):
+        t = c[n]
+        lines.append('- %s 실행=%s 닿음=%s → %s' % (n, dump(t['runs']), dump(t['reached']), t['result']))
+    lines.append('- 닿은 수: %s' % ('못 잼' if c['reach_count'] is None else c['reach_count']))
+    for n in ('H1', 'H2'):
+        t = c[n]
+        lines.append('- %s 장면=%s 앞=%s 새=%s 닿음=%s → %s · %s' % (n, t['scene'], dump(t['old']), dump(t['new']),
+                                                                  dump(t['reached']), t['result'], t['help']))
+    for n in ('G1', 'G2', 'G3', 'G4', 'G5', 'G6'):
+        t = c[n]
+        lines.append('- %s 한도=%s 새=%s → %s' % (n, dump(t['limit']), dump(t['new']), t['result']))
+    lines.append('- 훅 빠짐: %s' % (', '.join(c['hook_none']) or '없음'))
+    lines.append('- 셸로만 고침: %s' % (', '.join(c['shell_only']) or '없음'))
+    if c['replaced']:
+        lines.append('- 대신 돈 실행: %s' % ', '.join('%s → %s(끝 값 %s)' % (r['old'], r['new'], r['exit']) for r in c['replaced']))
+    lines.append('- 돈: %s' % ('모름' if c['cost_ratio'] is None else '앞의 평균 %.2f배' % c['cost_ratio']))
+    lines.append('- 판정: %s' % c['judgment'])
+    for n in c['notes']:
+        lines.append('- 덧붙임: %s' % n)
+    lines.append('')
+    lines.append('### 곁 표')
+    lines.append('')
+    cols = ('run', 'task', 'kit', 'exit', 't2', 'interjections', 'check_line', 'reached', 'hook_none', 'shell_only',
+            'cost', 'before_cost', 'cost_x')
+    lines.append('| ' + ' | '.join(cols) + ' |')
+    lines.append('|' + '---|' * len(cols))
+    for s in c['side']:
+        lines.append('| ' + ' | '.join(dump(s[k]) if isinstance(s[k], (dict, float)) else str(s[k]) for k in cols) + ' |')
+    return '\n'.join(lines) + '\n'
+
+
+def cmd_compare_n(cfg, out):
+    try:
+        real = os.path.realpath(str(out))
+    except (OSError, ValueError):
+        print('%s 폴더를 못 풂' % N_SUB)
+        return 2
+    if not n_dir_ok(real) or os.path.basename(os.path.dirname(real)) != 'out-done':
+        print('%s 폴더에만 씀(out-done 아래)' % N_SUB)
+        return 2
+    if not os.path.isdir(real):
+        print('%s 폴더가 없음' % N_SUB)
+        return 2
+    try:
+        c = compare_n(cfg, real)
+        with open(os.path.join(real, 'compare.json'), 'w', encoding='utf-8') as f:
+            json.dump(c, f, ensure_ascii=False, indent=1)
+            f.write('\n')
+    except (ValueError, KeyError, OSError) as e:
+        print('「%s」' % one(str(e) or e.__class__.__name__))
+        return 2
+    sys.stdout.write(compare_n_text(c))
+    return 0
+
+
+# ---------- 넷째 차례(m · n) · 다음 실행 정하기 ----------
+
+def _round_n(cfg):
+    rr = cfg.get('round_n')
+    if not isinstance(rr, list) or not rr:
+        raise ValueError('round_n가 없음')
+    rows, order = {}, []
+    for r in rr:
+        if not (isinstance(r, (list, tuple)) and len(r) in (3, 4) and all(isinstance(x, str) for x in r)
+                and N_RUN_RE.fullmatch(r[0])) or r[0] in rows or (len(r) == 4) != (r[1] == 'z0'):
+            raise ValueError('round_n가 틀림')
+        num = int(r[0][1:])
+        if not (1 <= num <= 9 if r[0][0] == 'm' else 0 <= num <= 19):
+            raise ValueError('round_n가 틀림')
+        rows[r[0]] = list(r)
+        order.append(r[0])
+    redo = cfg.get('redo_n')
+    if redo is None:
+        redo = {}
+    if not isinstance(redo, dict) or len(set(redo.values())) != len(redo):
+        raise ValueError('redo_n가 틀림')
+    for old, new in redo.items():
+        if (old not in rows or new not in rows or old == new or new in redo or old[0] != new[0]
+                or rows[old][1:] != rows[new][1:]):
+            raise ValueError('redo_n가 틀림')
+    return rows, order, redo
+
+
+def _sha_line(path, key):
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            for line in f:
+                w = line.split()
+                if w and w[0] == key:
+                    return w[1] if len(w) > 1 and re.fullmatch(r'[0-9a-f]{64}', w[1]) else None
+    except OSError:
+        pass
+    return None
+
+
+def _sha_copy(path):
+    return _sha_line(path, 'copy')
+
+
+def _sha_kit(path):
+    return _sha_line(path, 'kit')
+
+
+def _kitsha_now(kit):
+    if not isinstance(kit, str) or not kit:
+        return None
+    try:
+        p = subprocess.run(['bash', os.path.join(HERE, 'stage.sh'), 'kitsha', kit], capture_output=True, text=True,
+                           encoding='utf-8', errors='replace', timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    v = p.stdout.strip()
+    return v if re.fullmatch(r'[0-9a-f]{64}', v) else None
+
+
+def _bad_run(cfg, kd, r, task):
+    try:
+        chk = read_check(os.path.join(kd, r + '.check'))
+    except OSError:
+        chk = {}
+    chk.setdefault('run', r)
+    d = _jload(os.path.join(kd, r + '.json')) or {}
+    ex = chk.get('exit', '')
+    reason = void_reason(d, chk, task, cfg)
+    if reason:
+        return '무효:%s' % reason
+    if ex.isdigit() and int(ex) in (cfg.get('void_exits') or []):
+        return '무효:exit%d' % int(ex)
+    if ex not in [str(x) for x in (cfg.get('g3_exits_n') or [])]:
+        return '끝 값 밖:%s' % ex
+    return None
+
+
+def _stuck(why):
+    return {'state': 'stuck', 'run': None, 'row': None, 'why': why}
+
+
+def _copy_gate(cfg):
+    """copy를 내주기 전에 지금 꾸러미와 사본 폴더가 진짜로 있는지 본다. 없으면 까닭 글, 있으면 None."""
+    kit = cfg.get('kit')
+    if not isinstance(kit, str) or not kit:
+        return 'cfg의 kit가 없음 — 사본을 뜰 꾸러미를 모름'
+    if _kitsha_now(kit) is None:
+        return 'kit 폴더가 없음 또는 지문을 못 셈: %s' % one(kit)
+    X = os.environ.get('STAGE_X', cfg.get('work'))
+    if not isinstance(X, str) or not X or not os.path.isdir(os.path.join(X, 'env', 'kit')):
+        return 'X/env/kit 폴더가 없음 — 옮길 0.9.0 사본이 없음'
+    return None
+
+
+def next_n(cfg, kd):
+    rows, order, redo = _round_n(cfg)
+    for key in ('g3_exits_n', 'void_exits'):
+        if not isinstance(cfg.get(key), list):
+            raise ValueError('%s가 없음' % key)
+    kd = str(kd)
+    od = os.path.dirname(os.path.abspath(kd))
+    if os.path.basename(od) != 'out-done':
+        raise ValueError('값 폴더의 윗폴더가 out-done이 아님')
+    try:
+        if not os.path.isdir(od):
+            raise OSError('윗폴더가 없음')
+        os.listdir(od)
+        if os.path.lexists(kd):
+            os.listdir(kd)
+    except OSError as e:
+        raise ValueError('값 폴더를 못 읽음: %s' % one(str(e)))
+    ysha = _sha_copy(os.path.join(od, 'kit-y.sha'))
+    if ysha is None:
+        return _stuck('kit-y.sha 없음 — 못 읽거나 copy 줄이 없음')
+    npath = os.path.join(od, 'kit-n.sha')
+    nsha_exists, nsha, nkit = os.path.lexists(npath), _sha_copy(npath), _sha_kit(npath)
+
+    def done(r):
+        return os.path.isfile(os.path.join(kd, r + '.check'))
+
+    def bad(r):
+        return _bad_run(cfg, kd, r, rows[r][1])
+
+    newer = set(redo.values())
+
+    def pick(letter):
+        for new in order:
+            if new[0] != letter or new not in newer or done(new):
+                continue
+            old = [o for o, n in redo.items() if n == new][0]
+            if not done(old):
+                continue
+            if not (bad(old) or '').startswith('무효:'):
+                return _stuck('redo_n의 옛 실행이 무효가 아님: %s' % old)
+            return {'state': 'run', 'run': new, 'row': rows[new], 'why': ''}
+        for r in order:
+            if r[0] == letter and r not in newer and not done(r):
+                return {'state': 'run', 'run': r, 'row': rows[r], 'why': ''}
+        return None
+
+    live = [r for r in order if done(r) and not (r in redo and done(redo[r]))]
+
+    def orphan(p):
+        """내려는 실행의 이름으로 시작하는 파일이 값 폴더에 남아 있으면 끊긴 실행이라 막는다."""
+        if p is None or p['state'] != 'run':
+            return None
+        try:
+            names = sorted(f for f in os.listdir(kd) if f.startswith(p['run'] + '.'))
+        except OSError:
+            return None
+        if not names:
+            return None
+        return _stuck('끊긴 실행 %s — .check 없음 · 값 폴더에 %s가 남음 · 손 절차를 따를 것' % (p['run'], one(names[0])))
+
+    pm = pick('m')
+    if pm is not None:
+        if orphan(pm):
+            return orphan(pm)
+        if pm['state'] == 'run' and nsha_exists:
+            return _stuck('kit-n.sha가 있음 — 사본을 이미 바꿈, m을 돌릴 수 없음')
+        return pm
+    notes = []
+    for r in live:
+        if r[0] == 'm':
+            b = bad(r)
+            if b and b.startswith('무효:'):
+                return _stuck('다시 돌릴 m을 먼저 — %s %s · redo_n에 짝을 적을 것' % (r, b))
+            if b:
+                notes.append('%s 끝 값 %s — 결과 글에 따로 적는다' % (r, b.split(':', 1)[1]))
+
+    def fin(state, run=None, why=''):
+        row = rows[run] if run else None
+        return {'state': state, 'run': run, 'row': row, 'why': ' · '.join([why] + notes if why else notes)}
+
+    if nsha is None:
+        if nsha_exists:
+            return _stuck('kit-n.sha가 깨짐 — copy 줄을 못 읽음')
+        gate = _copy_gate(cfg)
+        return _stuck(gate) if gate else fin('copy', why='kit-n.sha 없음')
+    if nsha == ysha:
+        gate = _copy_gate(cfg)
+        return _stuck(gate) if gate else fin('copy', why='kit-n.sha의 사본 지문이 kit-y.sha와 같음 — 사본을 새로 뜨지 않았음')
+    if nkit != nsha or nsha != _kitsha_now(cfg.get('kit')):
+        return _stuck('kit-n.sha의 kit 줄·copy 줄·지금 꾸러미 지문이 다름 — 섞인 사본일 수 있음')
+    g1 = '미룸(G1) · 남은 n을 돌리지 않음 · 무효로 볼 일이면 설정 void에 까닭을 적고 redo_n에 짝'
+    for r in live:
+        if r[0] != 'n':
+            continue
+        b = bad(r)
+        if rows[r][1] == 'z0':
+            if b and b.startswith('끝 값 밖:'):
+                return _stuck('작은 확인 %s 끝 값 %s — 새 팔을 시작하지 않음' % (r, b.split(':', 1)[1]))
+            if b and r not in redo:
+                return _stuck('다시 돌릴 n을 먼저 — %s %s · redo_n에 짝을 적을 것' % (r, b))
+            continue
+        if b and b.startswith('끝 값 밖:'):
+            return _stuck('%s 끝 값 %s — %s' % (r, b.split(':', 1)[1], g1))
+        if b and r not in redo:
+            return _stuck('다시 돌릴 n을 먼저 — %s %s · redo_n에 짝을 적을 것' % (r, b))
+        if not b:
+            try:
+                t2 = read_check(os.path.join(kd, r + '.check')).get('t2')
+            except OSError:
+                t2 = None
+            if t2 != 'sent':
+                return _stuck('%s t2 %s — %s' % (r, one(str(t2)) if t2 is not None else '없음', g1))
+    pn = pick('n')
+    if pn is not None:
+        if orphan(pn):
+            return orphan(pn)
+        return fin(pn['state'], pn['run']) if pn['state'] == 'run' else pn
+    return fin('done', why='compare-n 차례')
+
+
+def _copy_line(cfg, od):
+    X = os.environ.get('STAGE_X', cfg.get('work'))
+    kit = cfg.get('kit')
+    xk = os.path.join(X, 'env', 'kit')
+    kd0, cp0 = os.path.join(od, 'kit090-copy'), os.path.join(od, 'kit-n.sha')
+    sh = os.path.join(HERE, 'stage.sh')
+    q = shlex.quote
+    return ' && '.join([
+        '[ -d %s ]' % q(kit),
+        '[ -d %s ]' % q(xk),
+        '[ ! -e %s ]' % q(kd0),
+        'mv %s %s' % (q(xk), q(kd0)),
+        'mkdir -p %s' % q(xk),
+        'cp -a %s %s' % (q(kit + '/.'), q(xk + '/')),
+        '{ echo "kit $(bash %s kitsha %s)"; echo "copy $(bash %s kitsha %s)"; } > %s'
+        % (q(sh), q(kit), q(sh), q(xk), q(cp0)),
+    ])
+
+
+def cmd_next_n(cfg, kd):
+    if not n_dir_ok(kd):
+        print('%s 폴더만 봄' % N_SUB)
+        return 2
+    try:
+        r = next_n(cfg, kd)
+    except ValueError as e:
+        print(one(str(e)))
+        return 2
+    if r['state'] == 'run':
+        row = r['row']
+        print('다음: %s %s %s%s' % (r['run'], row[1], row[2], ' ' + row[3] if len(row) > 3 else ''))
+        if r['why']:
+            print('주의: %s' % r['why'])
+        return 0
+    if r['state'] == 'done':
+        print('끝: %s' % r['why'])
+        return 0
+    if r['state'] == 'stuck':
+        print('막힘: %s' % r['why'])
+        return 2
+    print('다음: 사본 바꾸기 — %s' % r['why'])
+    print(_copy_line(cfg, os.path.dirname(os.path.abspath(str(kd)))))
+    return 0
+
+
+def cmd_turn_n(cfg, kd, run):
+    if not n_dir_ok(kd):
+        print('%s 폴더만 봄' % N_SUB)
+        return 2
+    if not N_RUN_RE.fullmatch(run):
+        print('실행 이름이 틀림')
+        return 2
+    try:
+        r = next_n(cfg, kd)
+    except ValueError as e:
+        print(one(str(e)))
+        return 2
+    if r['state'] == 'run' and r['run'] == run:
+        return 0
+    print('차례가 아님: %s — %s' % (one(run), ('다음은 ' + r['run']) if r['state'] == 'run' else r['why']))
+    return 2
+
+
 # ---------- order · text · cfg ----------
 
 def cmd_order(cfg, run, task, arm):
@@ -1697,6 +2391,9 @@ def cmd_order(cfg, run, task, arm):
         if list(r[:3]) == [run, task, arm]:
             return 0
     for r in cfg.get('round_y', []):
+        if list(r[:3]) == [run, task, arm]:
+            return 0
+    for r in cfg.get('round_n', []):
         if list(r[:3]) == [run, task, arm]:
             return 0
     print('차례에 없는 짝: %s %s %s' % (one(run), one(task), one(arm)))
@@ -1740,7 +2437,7 @@ def main(argv):
     except Exception:
         pass
     if len(argv) < 2:
-        print('쓰는 법: stage.py order|text|cfg|count|table|judge|after|compare <tasks.json> …')
+        print('쓰는 법: stage.py order|text|cfg|count|table|judge|after|compare|next-n|turn-n|compare-n <tasks.json> …')
         return 2
     cmd, tpath, rest = argv[0], argv[1], argv[2:]
     try:
@@ -1777,10 +2474,19 @@ def main(argv):
         return cmd_after(cfg, *rest)
     if cmd == 'compare' and len(rest) == 1:
         return cmd_compare(cfg, rest[0])
+    if cmd == 'compare-n' and len(rest) == 1:
+        return cmd_compare_n(cfg, rest[0])
     if cmd == 'table' and len(rest) == 1:
         sys.stdout.write(table_text(cfg, rest[0]))
         return 0
+    if cmd == 'next-n' and len(rest) == 1:
+        return cmd_next_n(cfg, rest[0])
+    if cmd == 'turn-n' and len(rest) == 2:
+        return cmd_turn_n(cfg, *rest)
     if cmd == 'judge' and len(rest) == 1:
+        if n_dir_ok(rest[0]):
+            print('%s 폴더는 judge 안 함 — compare-n' % N_SUB)
+            return 2
         rows, _ = load_rows(cfg, rest[0])
         j = judge(rows, cfg)
         with open(os.path.join(rest[0], 'judge.json'), 'w', encoding='utf-8') as f:

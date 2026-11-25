@@ -51,7 +51,7 @@ def work_root(cfg):
 
 
 def task_of(cfg, run):
-    for key in ("order", "zero", "rerun", "round_y"):
+    for key in ("order", "zero", "rerun", "round_y", "round_n"):
         for row in cfg.get(key, []):
             if row and row[0] == run:
                 return row[1]
@@ -444,9 +444,28 @@ def pick_form(body, field, method="post"):
     return None
 
 
-def override(pairs, changes):
+def form_segment(body, field):
+    """pick_form과 같은 고르기(POST이고 field 칸이 든 첫 양식) → {"action", "seg", "pairs"} · 없으면 None.
+    seg는 그 양식의 </form>까지의 조각이고, pairs·checkbox_names는 이 같은 조각에서만 뽑는다(D6)."""
+    starts = [m.start() for m in re.finditer(r"<form\b", body, re.I)]
+    for i, st in enumerate(starts):
+        seg = body[st:(starts[i + 1] if i + 1 < len(starts) else len(body))]
+        head = _FormHead()
+        head.feed(seg)
+        head.close()
+        if head.method == "post" and field in head.names:
+            end = re.search(r"</form\s*>", seg, re.I)
+            if end:
+                seg = seg[:end.end()]
+            return {"action": head.action, "seg": seg, "pairs": form_pairs(seg)}
+    return None
+
+
+def override(pairs, changes, drop=()):
     out, placed = [], set()
     for k, v in pairs:
+        if k in drop:
+            continue
         if k in changes:
             if k not in placed:
                 out.append((k, changes[k]))
@@ -1127,6 +1146,231 @@ def u_scenes(cli, libdb, res, notes):
     res["U4"] = sidestep(u4, notes, "U4")
 
 
+
+# ---------- b4 장면 K1~K4 ----------
+
+K_BASE_FIELDS = ("admin_role", "download_role", "viewer_role", "upload_role", "edit_role", "delete_role", "passwd_role",
+                 "edit_shelf_role", "kobo_only_shelves_sync", "Show_detail_random")
+
+
+def checkbox_names(seg):
+    """한 양식 조각의 모든 체크 칸 이름(켜짐과 상관없이 · 차례대로 · 겹침 없음)."""
+    fi = _FormInputs()
+    fi.feed(seg)
+    fi.close()
+    out = []
+    for name, tag, typ in fi.items:
+        if tag == "input" and typ == "checkbox" and name not in out:
+            out.append(name)
+    return out
+
+
+def new_field(seg):
+    """사용자 양식 조각의 새 체크 칸 이름 · 하나로 못 좁히면 None."""
+    cands = [n for n in checkbox_names(seg) if n not in K_BASE_FIELDS and not n.startswith("show_")]
+    if len(cands) > 1:
+        cands = [n for n in cands if "shelf" in n.lower()]
+    return cands[0] if len(cands) == 1 else None
+
+
+def app_db_ro(appdb):
+    return sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(appdb), uri=True)
+
+
+def _db_one(appdb, sql, arg):
+    """(읽었나, 첫 줄 또는 None). 파일 없음·잠김·표 없음·열기 실패는 (False, None) — 읽기 전용으로만 연다."""
+    try:
+        con = app_db_ro(appdb)
+        try:
+            return True, con.execute(sql, (arg,)).fetchone()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError):
+        return False, None
+
+
+def shelf_made(appdb, name):
+    """shelf 표에 name인 줄이 있나 · 읽기 오류면 None(False로 삼키지 않는다 · H5)."""
+    ok, row = _db_one(appdb, "select count(*) from shelf where name = ?", name)
+    return None if not ok else bool(row and row[0] >= 1)
+
+
+def _user_row(appdb, name):
+    ok, row = _db_one(appdb, "select id from user where name = ? order by id limit 1", name)
+    return ok, (int(row[0]) if row else None)
+
+
+def user_id(appdb, name):
+    return _user_row(appdb, name)[1]
+
+
+def k_sidestep(fn, notes, key, pw):
+    """sidestep과 같은 꼴 · None(못 잼)은 그대로 둔다 · 예외 글에서 비밀번호의 네 꼴을 지운 뒤에 200자로 자른다(D5 · M6)."""
+    try:
+        r = fn()
+        return None if r is None else bool(r)
+    except Exception as e:
+        msg = "%s: %s" % (type(e).__name__, e)
+        forms = {pw, urllib.parse.quote_plus(pw), urllib.parse.quote(pw, safe=""), repr(pw)[1:-1]}
+        for f in sorted((f for f in forms if f), key=len, reverse=True):
+            msg = msg.replace(f, "***")
+        notes[key] = msg[:200]
+        return False
+
+
+def new_user_name():
+    return "zzk" + "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(8))
+
+
+def new_password():
+    """16자 · 숫자·소문자·대문자·특수 각 1 이상. 결과·notes·로그·예외 글에 넣지 않는다."""
+    pools = ("0123456789", "abcdefghijklmnopqrstuvwxyz", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "!#%+-_")
+    chars = [secrets.choice(p) for p in pools]
+    allc = "".join(pools)
+    chars += [secrets.choice(allc) for _ in range(16 - len(chars))]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def _post_path(action, here):
+    """양식 action → 보낼 경로. 비면 그 화면 주소."""
+    p = urllib.parse.urlsplit(urllib.parse.urljoin(here, (action or "").strip()))
+    return (p.path or here) + ("?" + p.query if p.query else "")
+
+
+def _user_shelf_post(c, user, pw, title):
+    """새 접속 c로 로그인해 책장 title을 보낸다 → (None, 응답 상태) · 보낼 수 없으면 (까닭 글, None)."""
+    if not c.login(user, pw):
+        return "로그인 안 됨", None
+    st, _, me = c.get("/me")
+    mf = form_segment(me, "email") if st == 200 else None
+    if mf is None:
+        return "로그인 안 됨(/me에 사용자 양식 없음)", None
+    st, _, body = c.get("/shelf/create")
+    sf = form_segment(body, "title") if st == 200 else None
+    if sf is not None:
+        tok = csrf_token(sf["seg"])
+        pairs, path = override(sf["pairs"], {"title": title}), _post_path(sf["action"], "/shelf/create")
+    else:
+        tok = csrf_token(mf["seg"])
+        pairs, path = [("csrf_token", tok or ""), ("title", title)], "/shelf/create"
+    if not tok:
+        return "csrf_token을 못 얻음", None
+    st, _, _ = c.post(path, pairs)
+    return None, st
+
+
+def k_scenes(cli, appdb, res, notes):
+    pw = new_password()
+    user = new_user_name()
+    ctx = {}
+
+    def k1():
+        st, _, body = cli.get("/shelf/create")
+        if st != 200:
+            raise WalkError("GET /shelf/create %s" % st)
+        f = form_segment(body, "title")
+        if f is None:
+            raise WalkError("책장 양식이 없음")
+        st, _, _ = cli.post(_post_path(f["action"], "/shelf/create"), override(f["pairs"], {"title": "zz-k1"}))
+        if st >= 500:
+            raise WalkError("책장 저장 응답 %s" % st)
+        made = shelf_made(appdb, "zz-k1")
+        if made is None:
+            notes["K1"] = "db를 못 읽음"
+        elif not made:
+            notes["K1"] = "책장이 안 생김"
+        return made
+
+    def k2():
+        st, _, body = cli.get("/admin/user/new")
+        if st != 200:
+            raise WalkError("GET /admin/user/new %s" % st)
+        f = form_segment(body, "email")
+        if f is None:
+            raise WalkError("사용자 양식이 없음")
+        name = new_field(f["seg"])
+        if name is None:
+            notes["K2"] = "새 칸을 하나로 못 좁힘"
+            return False
+        ctx["field"] = name
+        return True
+
+    def k3():
+        st, _, body = cli.get("/admin/user/new")
+        if st != 200:
+            raise WalkError("GET /admin/user/new %s" % st)
+        f = form_segment(body, "email")
+        if f is None:
+            raise WalkError("사용자 양식이 없음")
+        pairs = override(f["pairs"], {"name": user, "email": user + "@example.org", "password": pw}, drop=(ctx["field"],))
+        st, _, _ = cli.post(_post_path(f["action"], "/admin/user/new"), pairs)
+        if st >= 500:
+            raise WalkError("사용자 저장 응답 %s" % st)
+        ok, uid = _user_row(appdb, user)
+        if not ok:
+            notes["K3"] = "db를 못 읽음"
+            return None
+        if uid is None:
+            notes["K3"] = "사용자가 안 생김"
+            return False
+        why, st = _user_shelf_post(Client(cli.base), user, pw, "zz-k3")
+        if why is not None:
+            notes["K3"] = why
+            return False
+        if st >= 500:
+            notes["K3"] = "책장 저장 응답 %s" % st
+            return False
+        made = shelf_made(appdb, "zz-k3")
+        if made is None:
+            notes["K3"] = "db를 못 읽음"
+            return None
+        if made:
+            notes["K3"] = "새 칸 없이도 책장이 생김"
+        return not made
+
+    def k4():
+        ok, uid = _user_row(appdb, user)
+        if not ok:
+            notes["K4"] = "db를 못 읽음"
+            return None
+        if uid is None:
+            notes["K4"] = "사용자가 안 생김"
+            return False
+        path = "/admin/user/%d" % uid
+        st, _, body = cli.get(path)
+        if st != 200:
+            raise WalkError("GET %s %s" % (path, st))
+        f = form_segment(body, "email")
+        if f is None:
+            raise WalkError("사용자 편집 양식이 없음")
+        st, _, _ = cli.post(_post_path(f["action"], path), override(f["pairs"], {ctx["field"]: "on"}))
+        if st >= 500:
+            raise WalkError("사용자 저장 응답 %s" % st)
+        why, st = _user_shelf_post(Client(cli.base), user, pw, "zz-k4")
+        if why is not None:
+            notes["K4"] = why
+            return False
+        if st >= 500:
+            notes["K4"] = "책장 저장 응답 %s" % st
+            return False
+        made = shelf_made(appdb, "zz-k4")
+        if made is None:
+            notes["K4"] = "db를 못 읽음"
+        elif not made:
+            notes["K4"] = "새 칸을 보냈는데 책장이 안 생김"
+        return made
+
+    res["K1"] = k_sidestep(k1, notes, "K1", pw)
+    res["K2"] = k_sidestep(k2, notes, "K2", pw)
+    if res["K2"] is not True:
+        res["K3"] = res["K4"] = False
+        notes["K3"] = notes["K4"] = "K2가 안 돼 걸지 않음"
+        return
+    res["K3"] = k_sidestep(k3, notes, "K3", pw)
+    res["K4"] = k_sidestep(k4, notes, "K4", pw)
+
+
 # ---------- prep ----------
 
 def src_repo(S, task):
@@ -1276,14 +1520,20 @@ def walk_port(cfg, run, base):
     pc = cfg["ports"]
     if base:
         return pc["base"][base]
-    m = re.match(r"^([rxvzwy])(\d+)$", run)
+    m = re.fullmatch(r"([rxvzwymn])([0-9]+)", run)
     if not m:
         raise WalkError("걸어 보기 포트를 못 정함: %s" % run)
     if m.group(1) == "y" and not 0 <= int(m.group(2)) <= 19:
         raise WalkError("포트 범위 밖: %s" % run)
     if m.group(1) == "w" and not 1 <= int(m.group(2)) <= 15:
         raise WalkError("포트 범위 밖: %s" % run)
-    off = {"r": 0, "z": 60, "x": 20, "v": 40, "y": 70, "w": 24}[m.group(1)]
+    if m.group(1) == "m" and not 0 <= int(m.group(2)) <= 9:
+        raise WalkError("포트 범위 밖: %s" % run)
+    if m.group(1) == "n" and not 0 <= int(m.group(2)) <= 19:
+        raise WalkError("포트 범위 밖: %s" % run)
+    off = {"r": 0, "z": 60, "x": 20, "v": 40, "y": 70, "w": 24, "m": 100, "n": 110}[m.group(1)]
+    if m.group(1) in "rzxvwy" and off + int(m.group(2)) >= 100:   # 폭이 넓어져도 m·n 자리로 새지 않는다(R6 · D7)
+        raise WalkError("포트 범위 밖: %s" % run)
     p = pc["walk_base"] + off + int(m.group(2))
     if p >= pc["walk_base"] + pc["walk_range"]:
         raise WalkError("포트 범위 밖: %d" % p)
@@ -1292,11 +1542,12 @@ def walk_port(cfg, run, base):
 
 def cmd_walk_b(cfg, S, R, run, base, sub=None):
     task = base or task_of(cfg, run)
-    if task not in ("b1", "b2", "b3"):
+    if task not in ("b1", "b2", "b3", "b4"):
         raise WalkError("b 일감이 아님: %s" % (run or base))
     key = "base-" + base if base else run
     result_path = walk_json_path(R, key, sub)
     check_y_sub(run, base, sub)
+    check_n_sub(run, base, sub)
     if not base:
         check_first_ruler_open(R, run, sub)
     port = walk_port(cfg, run, base)
@@ -1362,6 +1613,8 @@ def cmd_walk_b(cfg, S, R, run, base, sub=None):
                     s_scenes(cli, libdb, res, notes)
                 elif task == "b3":
                     u_scenes(cli, libdb, res, notes)
+                elif task == "b4":
+                    k_scenes(cli, appdb, res, notes)
                 else:
                     y_scenes(cli, res, notes)
         finally:
@@ -1385,7 +1638,7 @@ def cmd_walk_b(cfg, S, R, run, base, sub=None):
     out_obj["notes"] = notes
     write_json(result_path, out_obj)
     for s in scenes:
-        print("%s %s" % (s, "true" if out_obj[s] else "false"))
+        print("%s %s" % (s, "null" if out_obj[s] is None else ("true" if out_obj[s] else "false")))
     for k, v in notes.items():
         print("메모 %s: %s" % (k, v))
     return 0
@@ -1464,6 +1717,7 @@ def safe_check(py, copy, values, cap):
 
 def cmd_check_c(cfg, S, R, run, base, with_fix, sub=None):
     check_y_sub(run, base, sub)
+    check_n_sub(run, base, sub)
     task = base or task_of(cfg, run)
     if task not in ("c1", "c2"):
         raise WalkError("c 일감이 아님: %s" % (run or base))
@@ -1539,6 +1793,7 @@ def a_scenes(cfg, task):
 
 def blank_a(cfg, R, run, sub=None):
     check_y_sub(run, None, sub)
+    check_n_sub(run, None, sub)
     task = task_of(cfg, run)
     scenes = a_scenes(cfg, task)
     path = walk_json_path(R, run, sub) if sub is not None else os.path.join(R, "out-done", run + ".walk.json")
@@ -1585,6 +1840,18 @@ def check_y_sub(run, base, sub):
             raise WalkError("w·y 실행과 b3 바탕은 --sub %s 로 부른다" % Y_SUB)
 
 
+N_SUB = "kit091"
+
+
+def check_n_sub(run, base, sub):
+    """m·n 실행과 b4 바탕은 값 폴더 kit091 로만 부르고, kit091 에는 그 둘만 쓴다 — 어기면 아무것도 쓰기 전에 멈춘다."""
+    if (run and re.fullmatch(r"[mn][0-9]+", run)) or base == "b4":
+        if sub != N_SUB:
+            raise WalkError("m·n 실행과 b4 바탕은 --sub %s 로 부른다" % N_SUB)
+    elif sub == N_SUB:
+        raise WalkError("%s에는 m·n 실행과 b4 바탕만" % N_SUB)
+
+
 def update_walk(R, run, updates, notes=None, sub=None):
     path = walk_json_path(R, run, sub)
     obj = read_json(path) or {"notes": {}}
@@ -1601,6 +1868,7 @@ def cmd_tests_a(cfg, S, R, run, sub=None):
     if sub is not None and not os.path.isfile(wpath):
         raise WalkError("둘째 자 폴더에 walk.json이 없음 — 1차 파일을 먼저 복사: %s" % wpath)
     check_y_sub(run, None, sub)
+    check_n_sub(run, None, sub)
     check_first_ruler_open(R, run, sub)
     src = os.path.join(S, "done", run, "w")
     if not os.path.isdir(src):
@@ -1718,7 +1986,7 @@ def build_parser():
     p = sub.add_parser("walk-b")
     common(p)
     p.add_argument("run", nargs="?")
-    p.add_argument("--base", choices=["b1", "b2", "b3"])
+    p.add_argument("--base", choices=["b1", "b2", "b3", "b4"])
     p.add_argument("--sub", default=None)
     p = sub.add_parser("check-c")
     common(p)
@@ -1739,8 +2007,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if getattr(a, "sub", None) is not None and not SUB_RE.fullmatch(a.sub):
         ap.error("--sub는 [a-z0-9]+만")
-    if a.cmd in ("blank-a", "check-c") and getattr(a, "sub", None) not in (None, Y_SUB):
-        ap.error("%s의 --sub는 %s만" % (a.cmd, Y_SUB))
+    if a.cmd in ("blank-a", "check-c") and getattr(a, "sub", None) not in (None, Y_SUB, N_SUB):
+        ap.error("%s의 --sub는 %s 또는 %s만" % (a.cmd, Y_SUB, N_SUB))
     if a.cmd in ("walk-b", "check-c"):
         if bool(a.run) == bool(a.base):
             ap.error("%s는 <run> 또는 --base 중 하나만" % a.cmd)

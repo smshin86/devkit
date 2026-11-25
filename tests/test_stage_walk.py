@@ -1863,3 +1863,731 @@ def test_walk_b_base_b3_choice(sw):
     assert a.base == "b3" and a.run is None
     for b in ("b1", "b2"):
         assert sw.build_parser().parse_args(["walk-b", "--base", b]).base == b
+
+
+# ---------- Task 5: m·n 포트 · kit091 지킴 · b4 바탕 ----------
+
+def b4_cfg():
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    if "b4" not in cfg["ports"].get("base", {}):
+        pytest.skip("ports.base.b4가 아직 없음")
+    cfg["round_n"] = [["m01", "b4", "p"]]
+    return cfg
+
+
+def cfg_n(rows):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    cfg["round_n"] = rows
+    return cfg
+
+
+def test_walk_port_m_n(sw):
+    base_b1 = 18390
+    b4 = base_b1 + 3                                 # 값을 글자로 박지 않고 다른 설정 값에서 셈한다
+    cfg = {"ports": {"walk_base": 18300, "walk_range": 200, "base": {"b1": base_b1, "b4": b4}}}
+    for run, port in (("m00", 18400), ("m01", 18401), ("m09", 18409), ("n00", 18410), ("n19", 18429)):
+        assert sw.walk_port(cfg, run, None) == port, run
+    assert sw.walk_port(cfg, "r01", "b4") == b4
+    for run in ("m10", "n20"):
+        with pytest.raises(sw.WalkError):
+            sw.walk_port(cfg, run, None)
+    narrow = {"ports": {"walk_base": 18300, "walk_range": 100, "base": {"b1": base_b1, "b4": b4}}}
+    with pytest.raises(sw.WalkError):
+        sw.walk_port(narrow, "m01", None)
+    for run, port in (("y00", 18370), ("w15", 18339), ("r01", 18301), ("z39", 18399)):
+        assert sw.walk_port(cfg, run, None) == port, run
+    for run in ("z40", "x80", "v60", "r100"):   # R6 · D7: 폭이 넓어져도 m·n 자리로 새지 않는다
+        with pytest.raises(sw.WalkError) as e:
+            sw.walk_port(cfg, run, None)
+        assert "포트 범위 밖" in str(e.value), run
+    ports = [sw.walk_port(cfg, "m%02d" % i, None) for i in range(10)] + [sw.walk_port(cfg, "n%02d" % i, None) for i in range(20)]
+    assert len(set(ports)) == 30
+    assert not set(ports) & ({18300 + 200 - 1} | set(cfg["ports"]["base"].values()))
+
+
+def test_walk_port_real_cfg_m_n(sw):
+    cfg = json.loads(TASKS.read_text(encoding="utf-8"))
+    pc = cfg["ports"]
+    if "b4" not in pc.get("base", {}):
+        pytest.skip("ports.base.b4가 아직 없음")
+    ports = [sw.walk_port(cfg, "m%02d" % i, None) for i in range(1, 10)] + [sw.walk_port(cfg, "n%02d" % i, None) for i in range(20)]
+    assert len(set(ports)) == len(ports) == 29
+    ys = {sw.walk_port(cfg, "y%02d" % i, None) for i in range(20)}
+    assert not set(ports) & ({pc["walk_base"] + pc["walk_range"] - 1} | set(pc["base"].values()) | ys)
+
+
+def test_check_n_sub(sw):
+    for args in (("m01", None, None), ("n03", None, "kit09"), (None, "b4", None)):
+        with pytest.raises(sw.WalkError) as e:
+            sw.check_n_sub(*args)
+        assert "m·n 실행과 b4 바탕은 --sub kit091 로 부른다" in str(e.value)
+    for args in (("r01", None, "kit091"), ("y01", None, "kit091"), ("n01\n", None, "kit091"), (None, "b3", "kit091")):
+        with pytest.raises(sw.WalkError) as e:
+            sw.check_n_sub(*args)
+        assert "kit091에는 m·n 실행과 b4 바탕만" in str(e.value)
+    assert sw.N_SUB == "kit091"
+    for args in (("m01", None, "kit091"), (None, "b4", "kit091"), ("r01", None, None), ("y01", None, "kit09"),
+                 ("n01\n", None, None), ("n01\n", None, "kit09")):
+        assert sw.check_n_sub(*args) is None
+
+
+def test_task_of_round_n(sw):
+    cfg = cfg_y([["y03", "b3", "p"]])
+    cfg["round_n"] = [["n03", "c1", "p"], ["m01", "b4", "p"]]
+    assert sw.task_of(cfg, "n03") == "c1" and sw.task_of(cfg, "m01") == "b4"
+    assert sw.task_of(cfg, "y03") == "b3" and sw.task_of(cfg, "r03") == "a1" and sw.task_of(cfg, "n77") is None
+
+
+def test_mn_run_without_sub_writes_nothing(sw, tmp_path, monkeypatch):
+    cfg = cfg_n([["m01", "b4", "p"], ["n03", "c1", "p"], ["n05", "a1", "p"]])
+    S, R = tmp_path / "S", tmp_path / "R"
+    S.mkdir()
+    R.mkdir()
+    started = []
+    monkeypatch.setattr(sw, "run_cmd", lambda *a, **k: started.append(a) or (0, ""))
+    monkeypatch.setattr(sw, "free_port", lambda port: started.append(port) or True)
+    before = (tree_snap(S), tree_snap(R))
+    for sub in (None, "kit09"):
+        for call in (lambda: sw.blank_a(cfg, str(R), "n05", sub=sub),
+                     lambda: sw.cmd_tests_a(cfg, str(S), str(R), "n05", sub=sub),
+                     lambda: sw.cmd_walk_b(cfg, str(S), str(R), "m01", None, sub=sub),
+                     lambda: sw.cmd_check_c(cfg, str(S), str(R), "n03", None, False, sub=sub)):
+            with pytest.raises(sw.WalkError):
+                call()
+            assert (tree_snap(S), tree_snap(R)) == before
+    assert started == []
+
+
+def test_blank_a_and_check_c_sub_kit091(sw, tmp_path, monkeypatch, fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n03", "c1", "p"], ["n05", "a1", "p"]])
+    assert cli(w, "prep", "--root", str(w["R"]))[0] == 0
+    done = w["S"] / "done" / "n03" / "w"
+    sw.make_copy(w["S"] / "src-c" / "repo", w["base"], done)
+    git(done, "add", "-A")
+    git(done, "commit", "-q", "-m", "end", check=False)
+    res = {"ran": 1, "ok": True, "failures": 0, "errors": 0, "failed": []}
+    monkeypatch.setattr(sw, "run_runtests", lambda *a, **k: (dict(res), "Django installed in '/nowhere'"))
+    before = tree_snap(w["R"] / "out-done")
+    assert sw.cmd_check_c(cfg, str(w["S"]), str(w["R"]), "n03", None, False, sub="kit091") == 0
+    assert sw.blank_a(cfg, str(w["R"]), "n05", sub="kit091") is True
+    out = w["R"] / "out-done"
+    got = sorted(p.relative_to(out).as_posix() for p in out.rglob("*"))
+    assert got == sorted([p for p, _ in (before or [])] + ["kit091", "kit091/n03.hidden.json", "kit091/n05.walk.json"])
+    assert not (out / "n03.hidden.json").exists() and not (out / "n05.walk.json").exists()
+    assert (w["R"] / "walk" / "kit091-n03").is_dir() and not (w["R"] / "walk" / "n03").exists()
+
+
+def test_cli_sub_kit091_allowed(fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n05", "a1", "p"]])
+    w["tj"].write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    rc, out = cli(w, "blank-a", "n05", "--sub", "kit091", "--root", str(w["R"]))
+    assert rc == 0, out
+    assert (w["R"] / "out-done" / "kit091" / "n05.walk.json").is_file() and not (w["R"] / "out-done" / "n05.walk.json").exists()
+    rc, out = cli(w, "blank-a", "n05", "--sub", "kit0912", "--root", str(w["R"]))
+    assert rc == 2 and "kit091" in out, out
+    assert not (w["R"] / "out-done" / "kit0912").exists()
+
+
+def test_walk_b_base_b4_choice(sw):
+    a = sw.build_parser().parse_args(["walk-b", "--base", "b4"])
+    assert a.base == "b4" and a.run is None
+
+
+def test_walk_b_b4_skips_y_scenes(sw, tmp_path, monkeypatch):
+    cfg = b4_cfg()
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    shutil.copytree(Path(S) / "done" / "r11", Path(S) / "done" / "m01")
+    monkeypatch.setattr(sw, "wait_up", lambda url, secs: True)
+    scenes = cfg["tasks"]["b4"]["scenes"]
+    called = []
+
+    def fake(tag, names):
+        def f(*a):
+            called.append(tag)
+            for n in names:
+                a[-2][n] = True
+        return f
+    monkeypatch.setattr(sw, "e_scenes", fake("e", [s for s in scenes if s.startswith("E")]))
+    monkeypatch.setattr(sw, "u_scenes", fake("u", []))
+    monkeypatch.setattr(sw, "s_scenes", fake("s", []))
+    monkeypatch.setattr(sw, "y_scenes", fake("y", []))
+    monkeypatch.setattr(sw, "k_scenes", lambda *a: None)   # b4 장면은 따로 시험한다 — 여기서는 진짜 접속을 안 한다
+    assert sw.cmd_walk_b(cfg, S, R, "m01", None, sub="kit091") == 0
+    assert called == ["e"]
+    out = Path(R) / "out-done"
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == ["kit091", "kit091/m01.walk.json"]
+    d = json.loads((out / "kit091" / "m01.walk.json").read_text(encoding="utf-8"))
+    assert [k for k in d if k != "notes"] == scenes and all(type(d[k]) is bool for k in scenes)
+
+
+def test_tests_a_accepts_a1_with_kit091(sw, tmp_path, monkeypatch, fake_world):
+    cfg = cfg_n([["n05", "a1", "p"]])
+    fake_run(sw, monkeypatch)
+    S, R = a_done(tmp_path, {"app.py": "", "test_app.py": ""}, run="n05")
+    before = (tree_snap(S), tree_snap(R))
+    with pytest.raises(sw.WalkError):
+        sw.cmd_tests_a(cfg, S, R, "n05", sub=None)
+    assert (tree_snap(S), tree_snap(R)) == before
+    sw.blank_a(cfg, R, "n05", sub="kit091")
+    assert sw.cmd_tests_a(cfg, S, R, "n05", sub="kit091") == 0
+    assert walk_of(R, "n05", "kit091")["시험없음"] is False
+    out = Path(R) / "out-done"
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == ["kit091", "kit091/n05.walk.json"]
+    assert (Path(R) / "walk" / "kit091-n05-tests" / "w").is_dir() and not (Path(R) / "walk" / "n05-tests").exists()
+    # kit09 로 부르면(1차 파일이 있어 그 앞 검사를 넘겨도) 막는다
+    (out / "kit09").mkdir()
+    (out / "kit09" / "n05.walk.json").write_bytes(ONE)
+    before = (tree_snap(S), tree_snap(R))
+    with pytest.raises(sw.WalkError) as e:
+        sw.cmd_tests_a(cfg, S, R, "n05", sub="kit09")
+    assert "kit091" in str(e.value) and (tree_snap(S), tree_snap(R)) == before
+
+
+def test_walk_b_base_b4_needs_sub(sw, tmp_path, monkeypatch):
+    cfg = b4_cfg()
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    import tarfile
+    src = tmp_path / "tarsrc"
+    src.mkdir()
+    (src / "cps.py").write_text("import sys\nsys.exit(0)\n")
+    with tarfile.open(str(Path(R) / "bases" / "b.tar"), "w") as tf:
+        tf.add(str(src / "cps.py"), arcname="cps.py")
+    before = (tree_snap(S), tree_snap(R))
+    with pytest.raises(sw.WalkError):
+        sw.cmd_walk_b(cfg, S, R, None, "b4")
+    assert (tree_snap(S), tree_snap(R)) == before and not (Path(R) / "out-done").exists()
+    assert sw.cmd_walk_b(cfg, S, R, None, "b4", sub="kit091") == 0
+    out = Path(R) / "out-done"
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == ["kit091", "kit091/base-b4.walk.json"]
+    d = json.loads((out / "kit091" / "base-b4.walk.json").read_text(encoding="utf-8"))
+    assert [k for k in d if k != "notes"] == cfg["tasks"]["b4"]["scenes"] and not any(d[k] for k in cfg["tasks"]["b4"]["scenes"])
+
+
+# ---------- Task 6: b4 장면 K1~K4 · 칸 빼기 · 둘째 접속 · 비밀번호 ----------
+
+import urllib.parse as _up
+
+K_TOKEN = "zzTOKEN1"
+FAKE_PW = "zzFAKEvalue9!Aa"
+
+
+def make_fake_db(path):
+    c = sqlite3.connect(path)
+    c.execute("create table if not exists user(id integer primary key, name text)")
+    c.execute("create table if not exists shelf(id integer primary key, name text, user_id integer)")
+    c.execute("insert into user(id, name) values (1, 'zzadmin')")
+    c.execute("insert into user(id, name) values (2, 'zzguest')")
+    c.commit()
+    c.close()
+
+
+class FakeApp:
+    """같은 프로세스 안의 가짜 b4 앱. 요청마다 (client_id, method, path, data)를 log에 적는다."""
+
+    def __init__(self, db, new_fields=("zz_shelf_new",), grant_default=False, no_user=False, ignore_k4=False,
+                 shelf_500=False, login_fail=False, user_token=True, close_shelf_for_users=False,
+                 boom=None, boom_prefix=0, init_db=True, admin_shelf_noop=False, new_form_status=None, edit_500=False,
+                 create_500=False, user_shelf_500=(), new_form_status_from=1):
+        self.db = str(db)
+        if init_db:
+            make_fake_db(self.db)
+        self.new_fields = tuple(new_fields)
+        self.grant_default, self.no_user, self.ignore_k4 = grant_default, no_user, ignore_k4
+        self.shelf_500, self.login_fail, self.user_token = shelf_500, login_fail, user_token
+        self.close_shelf_for_users, self.boom, self.boom_prefix = close_shelf_for_users, boom, boom_prefix
+        self.admin_shelf_noop, self.new_form_status, self.edit_500 = admin_shelf_noop, new_form_status, edit_500
+        self.create_500, self.user_shelf_500 = create_500, tuple(user_shelf_500)
+        self.new_form_status_from, self.new_form_gets = new_form_status_from, 0
+        self.log = []
+        self.users = {}
+        self.n_clients = 0
+
+    def _boom_text(self, pw, data=None):
+        txt = "x" * self.boom_prefix + pw
+        if data is not None:
+            txt += " %r %s %s" % (data, _up.urlencode(data), "&".join(_up.quote(v, safe="") for _, v in data))
+        else:
+            txt += " %s %s" % (_up.quote_plus(pw), _up.quote(pw, safe=""))
+        return txt
+
+    def _insert(self, table, name):
+        c = sqlite3.connect(self.db)
+        cur = c.execute("insert into %s(name) values (?)" % table, (name,))
+        c.commit()
+        uid = cur.lastrowid
+        c.close()
+        return uid
+
+    def _tok(self, c):
+        return K_TOKEN if (c.who == "admin" or self.user_token) else ""
+
+    def _hidden(self, c):
+        t = self._tok(c)
+        return '<input type="hidden" name="csrf_token" value="%s">' % t if t else ""
+
+    def _page(self, *forms):
+        return ('<html><body><form action="/search" method="get"><input type="text" name="query"></form>'
+                + "".join(forms) + "</body></html>")
+
+    def _user_form(self, action, c, name="", email="", on=False):
+        boxes = '<input type="checkbox" name="admin_role" checked><input type="checkbox" name="show_32">' \
+                '<input type="checkbox" name="Show_detail_random">'
+        boxes += "".join('<input type="checkbox" name="%s"%s>' % (f, " checked" if on else "") for f in self.new_fields)
+        return ('<form action="%s" method="post">%s<input type="text" name="name" value="%s">'
+                '<input type="email" name="email" value="%s"><input type="password" name="password" value="">%s'
+                '<input type="submit" name="submit" value="Save"></form>' % (action, self._hidden(c), name, email, boxes))
+
+    def _shelf_form(self, c):
+        return ('<form action="/shelf/create" method="post">%s<input type="text" name="title" value="">'
+                '<input type="checkbox" name="is_public"><input type="checkbox" name="kobo_sync"></form>' % self._hidden(c))
+
+    def login(self, c, user, pw):
+        if self.boom == "login" and user in self.users:
+            raise RuntimeError(self._boom_text(pw))
+        self.log.append((c.cid, "POST", "/login", [("username", user)]))
+        if self.login_fail:
+            return False
+        u = self.users.get(user)
+        if u is None or u["pw"] != pw:
+            return False
+        c.who = user
+        return True
+
+    def handle(self, c, method, path, data=None):
+        self.log.append((c.cid, method, path, None if data is None else [tuple(p) for p in data]))
+        who = c.who
+        admin = who == "admin"
+        user = self.users.get(who)
+        if who is None:
+            return 302, {}, ""
+        if method == "GET":
+            if path == "/shelf/create":
+                if user and not user["granted"] and self.close_shelf_for_users:
+                    return 403, {}, ""
+                return 200, {}, self._page(self._shelf_form(c))
+            if path == "/me":
+                return 200, {}, self._page('<form action="/me" method="post">%s<input type="text" name="name" value="">'
+                                           '<input type="email" name="email" value=""></form>' % self._hidden(c))
+            if admin and path == "/admin/user/new":
+                self.new_form_gets += 1
+                if self.new_form_status and self.new_form_gets >= self.new_form_status_from:
+                    return self.new_form_status, {}, ""
+                return 200, {}, self._page(self._user_form("", c, on=True))
+            m = re.fullmatch(r"/admin/user/(\d+)", path)
+            if admin and m:
+                for n, u in self.users.items():
+                    if u["uid"] == int(m.group(1)):
+                        return 200, {}, self._page(self._user_form(path, c, n, n + "@example.org", on=u["granted"]))
+            return 404, {}, ""
+        d = dict(data)
+        names = [k for k, _ in data]
+        if path == "/shelf/create":
+            if not d.get("csrf_token"):
+                return 400, {}, ""
+            if admin:
+                if self.shelf_500:
+                    return 500, {}, ""
+                if self.admin_shelf_noop:
+                    return 302, {}, ""
+            elif d.get("title") in self.user_shelf_500:
+                return 500, {}, repr(data)          # 디버그 쪽처럼 요청 몸통을 되돌려 준다
+            elif not user["granted"]:
+                return 403, {}, ""
+            self._insert("shelf", d.get("title"))
+            return 302, {}, ""
+        if admin and path == "/admin/user/new":
+            if not d.get("csrf_token"):
+                return 400, {}, ""
+            if self.boom == "create":
+                raise RuntimeError(self._boom_text(d.get("password", ""), data))
+            if self.create_500:
+                return 500, {}, repr(data)
+            if not (d.get("name") and d.get("email") and d.get("password")):
+                return 200, {}, "Oops! Please complete all fields."
+            if not self.no_user:
+                uid = self._insert("user", d["name"])
+                self.users[d["name"]] = {"pw": d["password"], "uid": uid,
+                                         "granted": self.grant_default or any(f in names for f in self.new_fields)}
+            return 302, {}, ""
+        m = re.fullmatch(r"/admin/user/(\d+)", path)
+        if admin and m:
+            if not d.get("csrf_token"):
+                return 400, {}, ""
+            if self.edit_500:
+                return 500, {}, repr(data)
+            if not self.ignore_k4:
+                for u in self.users.values():
+                    if u["uid"] == int(m.group(1)):
+                        u["granted"] = any(f in names for f in self.new_fields)
+            return 302, {}, ""
+        return 404, {}, ""
+
+
+class FakeClient:
+    def __init__(self, app, admin=False):
+        app.n_clients += 1
+        self.cid = app.n_clients
+        self.app = app
+        self.base = "http://fake.invalid"
+        self.who = "admin" if admin else None
+
+    def get(self, path):
+        return self.app.handle(self, "GET", path)
+
+    def post(self, path, pairs):
+        return self.app.handle(self, "POST", path, list(pairs))
+
+    def login(self, user, pw):
+        return self.app.login(self, user, pw)
+
+
+def run_k(sw, monkeypatch, tmp_path, appdb=None, **kw):
+    app = FakeApp(tmp_path / "fake-app.db", **kw)
+    monkeypatch.setattr(sw, "Client", lambda base: FakeClient(app))
+    cli_ = FakeClient(app, admin=True)
+    res, notes = {}, {}
+    sw.k_scenes(cli_, appdb if appdb is not None else app.db, res, notes)
+    return app, cli_, res, notes
+
+
+def test_override_drop(sw):
+    pairs = [("a", "1"), ("x", "on"), ("x", "on"), ("b", "2")]
+    assert sw.override(pairs, {"b": "3"}, drop=("x",)) == [("a", "1"), ("b", "3")]
+    for ch in ({}, {"b": "3"}, {"x": "off", "z": "9"}):
+        assert sw.override(pairs, ch, drop=()) == sw.override(pairs, ch)
+    assert sw.override(pairs, {"b": "3"}) == [("a", "1"), ("x", "on"), ("x", "on"), ("b", "3")]
+    assert sw.override([("x", "1")], {"x": "2"}, drop=("x",)) == [("x", "2")]
+
+
+def k_form(*boxes, extra=""):
+    return ('<form method="get" action="/search"><input name="query"></form><form action="" method="post">'
+            '<input name="email" value="">' + "".join('<input type="checkbox" name="%s"%s>' % (n, c) for n, c in boxes)
+            + "</form>" + extra)
+
+
+def test_new_field_rules(sw):
+    def pick(*names):
+        f = sw.form_segment(k_form(*[(n, "") for n in names]), "email")
+        return sw.new_field(f["seg"])
+    assert pick("admin_role", "show_32", "zz_alpha") == "zz_alpha"
+    assert pick("admin_role", "zz_alpha", "zz_shelf_new") == "zz_shelf_new"
+    assert pick("zz_alpha", "zz_beta") is None
+    assert pick("zz_shelf_a", "zz_shelf_b") is None
+    assert pick("admin_role", "show_99", "Show_detail_random") is None
+    assert pick() is None
+    assert pick("zz_alpha", "zz_alpha") == "zz_alpha"          # 겹친 이름은 하나로 센다
+    f = sw.form_segment(k_form(("admin_role", " checked"), ("zz_inside", ""), extra='<input type="checkbox" name="zz_outside" checked>'), "email")
+    assert sw.checkbox_names(f["seg"]) == ["admin_role", "zz_inside"]
+    assert sw.new_field(f["seg"]) == "zz_inside"
+    assert ("zz_outside", "on") not in f["pairs"] and ("admin_role", "on") in f["pairs"]
+    assert f["action"] == "" and sw.form_segment(k_form(), "nope") is None
+    assert sw.form_segment('<form method="get"><input name="email"></form>', "email") is None
+    assert sw.K_BASE_FIELDS == ("admin_role", "download_role", "viewer_role", "upload_role", "edit_role", "delete_role",
+                                "passwd_role", "edit_shelf_role", "kobo_only_shelves_sync", "Show_detail_random")
+
+
+def test_new_password_policy(sw):
+    got = [sw.new_password() for _ in range(200)]
+    assert len(set(got)) == 200
+    for p in got:
+        assert len(p) == 16
+        assert re.search(r"\d", p) and re.search(r"[a-z]", p) and re.search(r"[A-Z]", p) and re.search(r"[!#%+_-]", p)
+        assert set(p) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#%+-_")
+    names = [sw.new_user_name() for _ in range(50)]
+    assert all(re.fullmatch(r"zzk[a-z]{8}", n) for n in names) and len(set(names)) > 40
+
+
+def test_shelf_made_and_user_id_read_only(sw, tmp_path):
+    d = tmp_path / "a b#c%"
+    d.mkdir()
+    db = str(d / "app.db")
+    make_fake_db(db)
+    c = sqlite3.connect(db)
+    c.execute("insert into shelf(name) values ('zz-k1')")
+    c.commit()
+    c.close()
+    before = (Path(db).read_bytes(), Path(db).stat().st_mtime_ns, sorted(os.listdir(d)))
+    assert sw.shelf_made(db, "zz-k1") is True and sw.shelf_made(db, "zz-k9") is False
+    assert sw.user_id(db, "zzadmin") == 1 and sw.user_id(db, "zzguest") == 2 and sw.user_id(db, "zznone") is None
+    assert (Path(db).read_bytes(), Path(db).stat().st_mtime_ns, sorted(os.listdir(d))) == before
+    nt = str(tmp_path / "notables.db")
+    sqlite3.connect(nt).close()
+    snap_ = sorted(os.listdir(tmp_path))
+    for p in (nt, str(tmp_path / "missing" / "app.db"), str(tmp_path / "missing.db")):
+        assert sw.shelf_made(p, "zz-k1") is None and sw.user_id(p, "zzadmin") is None, p
+    assert sorted(os.listdir(tmp_path)) == snap_ and not (tmp_path / "missing.db").exists()
+
+
+def k_cids(app, path, title=None):
+    return [e[0] for e in app.log if e[1] == "POST" and e[2] == path and (title is None or ("title", title) in e[3])]
+
+
+def test_k_scenes_all_pass(sw, monkeypatch, tmp_path):
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path)
+    assert res == {"K1": True, "K2": True, "K3": True, "K4": True}, notes
+    (k1,), (k3,), (k4,) = (k_cids(app, "/shelf/create", t) for t in ("zz-k1", "zz-k3", "zz-k4"))
+    assert k1 == cli_.cid and k3 != cli_.cid and k4 != cli_.cid and k3 != k4     # D3 — 둘째 접속 · K3와 K4는 따로
+    (create,) = [e for e in app.log if e[1] == "POST" and e[2] == "/admin/user/new"]
+    assert create[0] == cli_.cid and not any(k == "zz_shelf_new" for k, _ in create[3])
+    assert ("admin_role", "on") in create[3] and ("csrf_token", K_TOKEN) in create[3]
+    assert dict(create[3])["email"] == dict(create[3])["name"] + "@example.org"
+    (edit,) = [e for e in app.log if e[1] == "POST" and re.fullmatch(r"/admin/user/\d+", e[2])]
+    assert edit[0] == cli_.cid and ("zz_shelf_new", "on") in edit[3] and ("admin_role", "on") in edit[3]
+    logins = [e for e in app.log if e[2] == "/login"]
+    assert len(logins) == 2 and logins[0][0] != logins[1][0] and cli_.cid not in (logins[0][0], logins[1][0])
+    assert not any(v for v in notes.values() if FAKE_PW in str(v))
+
+
+def test_k_scenes_base_only_k1(sw, monkeypatch, tmp_path):
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path, new_fields=())
+    assert res == {"K1": True, "K2": False, "K3": False, "K4": False}
+    assert "K2" in notes and "K3" in notes and "K4" in notes
+    assert not [e for e in app.log if e[1] == "POST" and e[2] == "/admin/user/new"]
+    assert sw.shelf_made(app.db, "zz-k1") is True
+
+
+@pytest.mark.parametrize("kw,want", [
+    pytest.param(dict(shelf_500=True), (False, True, True, True), id="shelf-500"),
+    pytest.param(dict(new_fields=("zz_alpha", "zz_beta")), (True, False, False, False), id="two-new-fields"),
+    pytest.param(dict(grant_default=True), (True, True, False, True), id="grants-without-field"),
+    pytest.param(dict(no_user=True), (True, True, False, False), id="no-user"),
+    pytest.param(dict(login_fail=True), (True, True, False, False), id="login-fails"),
+    pytest.param(dict(ignore_k4=True), (True, True, True, False), id="k4-ignored"),
+    pytest.param(dict(user_token=False), (True, True, False, False), id="no-token-for-new-user"),
+    pytest.param(dict(close_shelf_for_users=True), (True, True, True, True), id="closed-screen-is-pass"),
+])
+def test_k_scenes_each_fails(sw, monkeypatch, tmp_path, kw, want):
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path, **kw)
+    assert tuple(res[k] for k in ("K1", "K2", "K3", "K4")) == want, notes
+    for k, ok in zip(("K1", "K2", "K3", "K4"), want):
+        assert ok or k in notes
+    if kw.get("user_token") is False:
+        assert not [e for e in app.log if e[0] != cli_.cid and e[1] == "POST" and e[2] == "/shelf/create"]
+    if kw.get("close_shelf_for_users"):                       # 토큰은 /me 에서 — 닫힌 화면 뒤에도 K3의 POST는 간다
+        assert [e for e in app.log if e[0] != cli_.cid and e[2] == "/me"]
+
+
+def test_k_scenes_db_unreadable_is_none(sw, monkeypatch, tmp_path):
+    missing = str(tmp_path / "nope" / "app.db")
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path, appdb=missing)
+    assert res["K2"] is True and res["K1"] is None and res["K3"] is None and res["K4"] is None
+    assert "db를 못 읽음" in notes["K3"] and not os.path.exists(missing)
+
+
+def forms_of(pw):
+    return [pw, _up.quote_plus(pw), _up.quote(pw, safe=""), repr(pw)[1:-1]]
+
+
+def test_k_scenes_password_never_recorded(sw, monkeypatch, tmp_path):
+    monkeypatch.setattr(sw, "new_password", lambda: FAKE_PW)
+    variants = [dict(), dict(boom="create"), dict(boom="create", boom_prefix=176), dict(boom="login"), dict(boom="login", boom_prefix=176)]
+    for i, kw in enumerate(variants):
+        d = tmp_path / ("v%d" % i)
+        d.mkdir()
+        app, cli_, res, notes = run_k(sw, monkeypatch, d, **kw)
+        dump = json.dumps(res) + json.dumps(notes)
+        for f in forms_of(FAKE_PW) + [FAKE_PW[:6]]:         # 앞 여섯 글자도 — 자르고 나서 지우면 앞 조각이 남는다
+            assert f not in dump, (kw, f)
+        if kw.get("boom"):
+            assert "***" in notes["K3"] and res["K3"] is False, (kw, notes)
+        else:
+            assert all(res.values())
+
+
+def test_k_scenes_password_never_recorded_in_walk_files(sw, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sw, "new_password", lambda: FAKE_PW)
+    cfg = b4_cfg()
+    for i, kw in enumerate((dict(), dict(boom="create", boom_prefix=176))):
+        d = tmp_path / ("w%d" % i)
+        d.mkdir()
+        S, R = b_world(sw, d, monkeypatch)
+        shutil.copytree(Path(S) / "done" / "r11", Path(S) / "done" / "m01")
+        make_fake_db(str(Path(R) / "walkkit" / "app.db"))
+        app = FakeApp(str(Path(R) / "walk" / "kit091-m01" / "app.db"), init_db=False, **kw)
+        made = []
+
+        def mk(base, app=app, made=made):
+            made.append(1)
+            return FakeClient(app, admin=len(made) == 1)
+        monkeypatch.setattr(sw, "Client", mk)
+        monkeypatch.setattr(sw, "wait_up", lambda url, secs: True)
+        monkeypatch.setattr(sw, "e_scenes", lambda *a: None)
+        assert sw.cmd_walk_b(cfg, S, R, "m01", None, sub="kit091") == 0
+        out = capsys.readouterr()
+        blob = (out.out + out.err).encode()
+        for p in Path(R).rglob("*"):
+            if p.is_file():
+                blob += b"\n" + p.read_bytes()
+        for f in forms_of(FAKE_PW) + [FAKE_PW[:6]]:
+            assert f.encode() not in blob, (kw, f)
+        got = json.loads((Path(R) / "out-done" / "kit091" / "m01.walk.json").read_text(encoding="utf-8"))
+        assert got["K1"] is True and got["K2"] is True
+        assert (got["K3"], got["K4"]) == ((False, False) if kw else (True, True)), got
+
+
+def test_walk_b_dispatches_b4(sw, tmp_path, monkeypatch):
+    cfg = b4_cfg()
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    shutil.copytree(Path(S) / "done" / "r11", Path(S) / "done" / "m01")
+    monkeypatch.setattr(sw, "wait_up", lambda url, secs: True)
+    scenes = cfg["tasks"]["b4"]["scenes"]
+    called, stopped = [], []
+
+    def fake(tag, names):
+        def f(*a):
+            called.append(tag)
+            for n in names:
+                a[-2][n] = True
+        return f
+    monkeypatch.setattr(sw, "e_scenes", fake("e", [s for s in scenes if s.startswith("E")]))
+    monkeypatch.setattr(sw, "k_scenes", fake("k", [s for s in scenes if not s.startswith("E")]))
+    monkeypatch.setattr(sw, "u_scenes", fake("u", []))
+    monkeypatch.setattr(sw, "s_scenes", fake("s", []))
+    monkeypatch.setattr(sw, "y_scenes", fake("y", []))
+    real_stop = sw.stop
+
+    def rec_stop(p, grace=10):
+        stopped.append(p)
+        return real_stop(p, grace)
+    monkeypatch.setattr(sw, "stop", rec_stop)
+    assert sw.cmd_walk_b(cfg, S, R, "m01", None, sub="kit091") == 0
+    assert called == ["e", "k"]
+    out = Path(R) / "out-done"
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*")) == ["kit091", "kit091/m01.walk.json"]
+    d = json.loads((out / "kit091" / "m01.walk.json").read_text(encoding="utf-8"))
+    assert [k for k in d if k != "notes"] == scenes and all(d[k] is True for k in scenes)
+    assert len(stopped) == 1 and stopped[0].poll() is not None
+
+
+# ---------- 고침 1판 (Task 5+6 리뷰) ----------
+
+def bytes_snap(root):
+    return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None) for p in Path(root).rglob("*")}
+
+
+def test_check_n_sub_guard_holds_in_check_c(sw, monkeypatch, fake_world):   # I1
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n03", "c1", "p"]])
+    assert cli(w, "prep", "--root", str(w["R"]))[0] == 0
+    done = w["S"] / "done" / "n03" / "w"
+    sw.make_copy(w["S"] / "src-c" / "repo", w["base"], done)
+    git(done, "add", "-A")
+    git(done, "commit", "-q", "-m", "end", check=False)
+    res = {"ran": 1, "ok": True, "failures": 0, "errors": 0, "failed": []}
+    monkeypatch.setattr(sw, "run_runtests", lambda *a, **k: (dict(res), "Django installed in '/nowhere'"))
+    before = bytes_snap(w["R"])
+    for run, sub in (("n03", None), ("n03", "kit09"), ("r01", "kit091")):
+        with pytest.raises(sw.WalkError) as e:
+            sw.cmd_check_c(cfg, str(w["S"]), str(w["R"]), run, None, False, sub=sub)
+        assert "kit091" in str(e.value), (run, sub, str(e.value))
+        assert bytes_snap(w["R"]) == before, (run, sub)
+    assert sw.cmd_check_c(cfg, str(w["S"]), str(w["R"]), "n03", None, False, sub="kit091") == 0
+    assert (w["R"] / "out-done" / "kit091" / "n03.hidden.json").is_file() and not (w["R"] / "out-done" / "n03.hidden.json").exists()
+
+
+def test_check_n_sub_guard_holds_in_walk_b(sw, tmp_path, monkeypatch):   # I1
+    cfg = b4_cfg()
+    S, R = b_world(sw, tmp_path, monkeypatch)
+    shutil.copytree(Path(S) / "done" / "r11", Path(S) / "done" / "m01")
+    before = (bytes_snap(S), bytes_snap(R))
+    for run, sub in (("m01", None), ("m01", "kit09"), ("r11", "kit091")):
+        with pytest.raises(sw.WalkError) as e:
+            sw.cmd_walk_b(cfg, S, R, run, None, sub=sub)
+        assert "kit091" in str(e.value), (run, sub, str(e.value))
+        assert (bytes_snap(S), bytes_snap(R)) == before, (run, sub)
+    assert sw.cmd_walk_b(cfg, S, R, "m01", None, sub="kit091") == 0           # 바른 sub는 지킴을 지나간다
+    assert (Path(R) / "out-done" / "kit091" / "m01.walk.json").is_file() and not (Path(R) / "out-done" / "m01.walk.json").exists()
+
+
+def test_run_name_digits_are_ascii_only(sw):   # F2
+    cfg = {"ports": {"walk_base": 18300, "walk_range": 200, "base": {}}}
+    for run in ("m\u0660\u0661", "n\u0661\u0662", "r\u0660\u0663", "y\u0660\u0660", "z\u0663\u0669", "w\u0660\u0661"):
+        with pytest.raises(sw.WalkError) as e:
+            sw.walk_port(cfg, run, None)
+        assert "포트를 못 정함" in str(e.value), run
+    assert sw.check_n_sub("m\u0660\u0661", None, None) is None
+    with pytest.raises(sw.WalkError) as e:
+        sw.check_n_sub("n\u0660\u0661", None, "kit091")
+    assert "kit091에는 m·n 실행과 b4 바탕만" in str(e.value)
+    assert sw.walk_port(cfg, "m01", None) == 18401 and sw.walk_port(cfg, "r03", None) == 18303
+
+
+def test_k1_false_without_reason_gets_note(sw, monkeypatch, tmp_path):   # F4
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path, admin_shelf_noop=True)
+    assert res["K1"] is False and "책장이 안 생김" in notes["K1"]
+    assert res["K2"] is True and res["K3"] is True and res["K4"] is True
+
+
+def test_k4_false_without_reason_gets_note(sw, monkeypatch, tmp_path):   # F4
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path, ignore_k4=True)
+    assert res["K4"] is False and "책장이 안 생김" in notes["K4"]
+
+
+K4S = ("K1", "K2", "K3", "K4")
+
+
+@pytest.mark.parametrize("kw,want,note_key,note_text", [
+    pytest.param(dict(create_500=True), (True, True, False, False), "K3", "사용자 저장 응답 500", id="create-user-500"),
+    pytest.param(dict(edit_500=True), (True, True, True, False), "K4", "사용자 저장 응답 500", id="k4-grant-500"),
+    pytest.param(dict(new_form_status=403), (True, False, False, False), "K2", "GET /admin/user/new 403", id="new-user-screen-403"),
+    pytest.param(dict(new_form_status=403, new_form_status_from=2), (True, True, False, False), "K3", "GET /admin/user/new 403", id="k3-new-user-screen-403"),
+    pytest.param(dict(user_shelf_500=("zz-k3",)), (True, True, False, True), "K3", "책장 저장 응답 500", id="k3-shelf-500"),
+    pytest.param(dict(user_shelf_500=("zz-k4",)), (True, True, True, False), "K4", "책장 저장 응답 500", id="k4-shelf-500"),
+])
+def test_k_scenes_unwalked_failure_paths(sw, monkeypatch, tmp_path, kw, want, note_key, note_text):   # F6 ①~④
+    monkeypatch.setattr(sw, "new_password", lambda: FAKE_PW)
+    app, cli_, res, notes = run_k(sw, monkeypatch, tmp_path, **kw)
+    assert tuple(res[k] for k in K4S) == want, notes
+    assert note_text in notes[note_key]
+    if kw.get("create_500") or kw.get("new_form_status"):
+        assert "사용자가" in notes["K4"] or "걸지 않음" in notes["K4"]                 # 못 만든 사용자 · 못 연 화면 뒤의 K4
+        assert not [e for e in app.log if e[0] != cli_.cid and e[1] == "POST" and e[2] == "/shelf/create"]
+    dump = json.dumps(res) + json.dumps(notes)
+    for f in forms_of(FAKE_PW) + [FAKE_PW[:6]]:
+        assert f not in dump, (kw, f)
+
+
+def test_k_scene_none_reaches_walk_file_as_null(sw, tmp_path, monkeypatch, capsys):   # F3 · F6 ⑤
+    monkeypatch.setattr(sw, "new_password", lambda: FAKE_PW)
+    cfg = b4_cfg()
+    for i, kw in enumerate((dict(), dict(create_500=True))):
+        d = tmp_path / ("n%d" % i)
+        d.mkdir()
+        S, R = b_world(sw, d, monkeypatch)                           # 이 걷는 사본 db에는 shelf·user 표가 없다 → 읽기 오류 → 못 잼
+        shutil.copytree(Path(S) / "done" / "r11", Path(S) / "done" / "m01")
+        app = FakeApp(d / "fake-app.db", **kw)
+        made = []
+
+        def mk(base, app=app, made=made):
+            made.append(1)
+            return FakeClient(app, admin=len(made) == 1)
+        monkeypatch.setattr(sw, "Client", mk)
+        monkeypatch.setattr(sw, "wait_up", lambda url, secs: True)
+        monkeypatch.setattr(sw, "e_scenes", lambda *a: None)
+        assert sw.cmd_walk_b(cfg, S, R, "m01", None, sub="kit091") == 0
+        out = capsys.readouterr()
+        raw = (Path(R) / "out-done" / "kit091" / "m01.walk.json").read_text(encoding="utf-8")
+        got = json.loads(raw)
+        assert got["K1"] is None and got["K2"] is True
+        want34 = (False, None) if kw else (None, None)      # 사용자 만들기가 500이어도 K4는 db를 못 읽으니 못 잼
+        assert (got["K3"], got["K4"]) == want34
+        assert "K1 null" in out.out.splitlines() and "K2 true" in out.out.splitlines()
+        assert ("K3 false" if kw else "K3 null") in out.out.splitlines() and "K4 null" in out.out.splitlines()
+        blob = (out.out + out.err + raw).encode()
+        for p in Path(R).rglob("*"):
+            if p.is_file():
+                blob += b"\n" + p.read_bytes()
+        for f in forms_of(FAKE_PW) + [FAKE_PW[:6]]:
+            assert f.encode() not in blob, (kw, f)
+
+
+def test_b4_cfg_skips_when_real_cfg_lacks_b4(tmp_path, monkeypatch):   # F5
+    fake = tmp_path / "cfg.json"
+    fake.write_text(json.dumps({"ports": {"walk_base": 1, "walk_range": 1, "base": {"b1": 2}}}))
+    monkeypatch.setattr(sys.modules[__name__], "TASKS", fake)
+    with pytest.raises(pytest.skip.Exception):
+        b4_cfg()
+    fake.write_text(json.dumps({"ports": {"walk_base": 1, "walk_range": 1, "base": {"b1": 2, "b4": 3}}}))
+    assert b4_cfg()["round_n"] == [["m01", "b4", "p"]]
