@@ -202,7 +202,9 @@ if [[ $RUN == [wymn]* ]]; then
   [ "$WCOPY" = "$(kitsha "$X/env/kit")" ] || { echo "꾸러미 사본이 지문 파일과 다름($SHAF) — 사본을 다시 만들거나 지문 파일을 사람이 맞출 것"; exit 9; }
   KD=$S/out-done/kit09
   if [[ $RUN == [mn]* ]]; then
-    KD=$S/out-done/kit091
+    KD_NAME=$(python3 -I -B "$HERE/stage.py" sub-n "$T" "$RUN") || { echo "$KD_NAME"; exit 9; }
+    [[ $KD_NAME =~ ^kit091[a-z]?$ ]] || { echo "값 폴더 이름이 틀림: $KD_NAME"; exit 9; }
+    KD=$S/out-done/$KD_NAME
     python3 -I -B "$HERE/stage.py" turn-n "$T" "$KD" "$RUN" || exit 9
   fi
 fi
@@ -226,7 +228,8 @@ if [ "${#LEFTOVER[@]}" -gt 0 ]; then
       awk '{print "    " $0}' "$f" 2> /dev/null
       case "${f##*/}" in
         [wy][0-9][0-9].*) echo "  이 파일을 지우지 말고 out-done/kit09·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것" ;;
-        [mn][0-9][0-9].*) echo "  이 파일을 지우지 말고 out-done/kit091·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것" ;;
+        [mn][0-9][0-9].*) echo "  이 파일을 지우지 말고 out-done/kit091·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것"
+          echo "  (작은 차례 실행이면 kit091 대신 sub-n이 찍는 폴더로)" ;;
         *) echo "  이 파일을 지우지 말고 out-done·done으로 옮기고, 거울($S/out-done/*.mirror)에 이 줄을 이을 것" ;;
       esac ;;
     esac

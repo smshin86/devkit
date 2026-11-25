@@ -31,6 +31,26 @@ SCENE_RE = re.compile(r'^[A-Z]\d+$')
 Y_SUB = 'kit09'   # 새 꾸러미 판의 값 폴더 이름(길 <뿌리>/out-done/kit09/)
 N_RUN_RE = re.compile(r'[mn][0-9]{2}')   # 어디서나 fullmatch로 본다(`$`는 끝 줄바꿈 앞에서도 맞는다)
 N_SUB = 'kit091'   # 넷째 차례의 값 폴더 이름(길 <뿌리>/out-done/kit091/)
+SMALL_RE = re.compile(r'kit091[a-z]')   # 작은 차례의 값 폴더 이름(길 <뿌리>/out-done/kit091c/) — 늘 fullmatch로 본다
+# net 세기: Bash 명령 글에 망 도구·코드 낱말이 하나라도 있을 때만 그 글의 주소를 센다(낱말이 없는 글의 주소는 안 셈).
+# 세는 쪽으로 틀리는 것은 뜻한 바다 — 코드 조각 낱말이 `self.http.get(x)`·`cat requests.txt`·`x.socket_path`·`uv.lock` 같은
+# 무관한 글에도 걸리지만, 주소 글자가 같은 명령에 있을 때만 셈에 든다. PowerShell 낱말만 대소문자를 가리지 않는다.
+NET_WORD_RE = re.compile(
+    r'(?<![\w.-])(?:curl|wget2?|nc|ncat|netcat|telnet|ssh|scp|sftp|rsync|ftp|lftp|aria2c|lynx|w3m'
+    r'|npm|npx|yarn|pnpm|bun|bunx|deno|pipx|pipenv|pdm|uv|uvx|poetry|conda|mamba|gem|cargo'
+    r'|apt|apt-get|dnf|yum|snap|brew|helm|mvn|gradle|docker|podman|svn|hg|gh|openssl|certutil'
+    r'|pip(?:\d[\d.]*)?\s+(?:install|download|index|search)'
+    r'|python(?:\d[\d.]*)?\s+-m\s*pip'
+    r'|go\s+(?:get|install|mod)'
+    r'|git(?:\s+-[cC]\s+\S+|\s+-(?![cC]\s)-?\w[\w-]*(?:=\S+)?){0,12}?\s+(?:clone|fetch|pull|push|ls-remote|remote|submodule))(?![\w-]|://)'
+    r'|urlopen|urlretrieve|urllib\.request|urllib3|requests\.|import\s+requests|from\s+requests|httpx|aiohttp'
+    r'|http\.client|HTTPConnection|HTTPSConnection|socket|XMLHttpRequest|axios|http\.get|https\.get'
+    r'|http\.request|https\.request|net\.connect|ftplib|smtplib|websocket'
+    r'|/dev/tcp/|(?<!\w)fetch\s*\('
+    r'''|require\s*\(\s*['"`](?:node:)?(?:https?|http2|net|tls|dgram)['"`]'''
+    r'''|(?:from|import)(?:\s+|\s*\(\s*)['"`](?:node:)?(?:https?|http2|net|tls)['"`]'''
+    r'|file_get_contents|LWP::|HTTP::Tiny|download\.file'
+    r'|(?i:Invoke-WebRequest|Invoke-RestMethod|WebClient|DownloadString|DownloadFile|Start-BitsTransfer)')
 
 
 def load_cfg(path=None):
@@ -620,7 +640,10 @@ def net_count(events, pkg_hosts=()):
             continue
         if name != 'Bash':
             continue
-        for m in re.finditer(r'https?://([^/\s:\'"?#]+)', str(inp.get('command') or '')):
+        cmd = str(inp.get('command') or '')
+        if not NET_WORD_RE.search(cmd):
+            continue
+        for m in re.finditer(r'https?://([^/\s:\'"?#]+)', cmd):
             host = m.group(1).lower()
             if host in ('localhost', '127.0.0.1'):
                 continue
@@ -1227,8 +1250,31 @@ def y_dir_ok(out):
     return os.path.basename(os.path.normpath(str(out))) == Y_SUB
 
 
-def n_dir_ok(out):
-    return os.path.basename(os.path.normpath(str(out))) == N_SUB
+def _small_loose(cfg):
+    """small_n를 예외 없이 너그럽게 읽는다 · {차례 이름: [실행 줄…]}. 엄격 검사는 _small_n이 하고, 부르는 쪽이 작은 차례를 실제로 다룰 때만 부른다."""
+    sm = cfg.get('small_n') if isinstance(cfg, dict) else None
+    if not isinstance(sm, dict):
+        return {}
+    out = {}
+    for name, item in sm.items():
+        if not (isinstance(name, str) and SMALL_RE.fullmatch(name) and isinstance(item, dict)):
+            continue
+        rr = item.get('round')
+        out[name] = [r for r in (rr if isinstance(rr, list) else []) if isinstance(r, list) and r and isinstance(r[0], str)]
+    return out
+
+
+def n_dir_ok(out, cfg=None):
+    # 엄격 검사는 하지 않는다(설계보다 좁음 — 엄격 검사는 그 폴더를 실제로 다루는 쪽이 한다). 예외를 내지 않는다.
+    name = os.path.basename(os.path.normpath(str(out)))
+    if name == N_SUB:
+        return True
+    if cfg is None or not (SMALL_RE.fullmatch(name) and name in _small_loose(cfg)):
+        return False
+    try:
+        return os.path.basename(os.path.realpath(str(out))) == name        # 작은 차례 이름의 링크가 다른 폴더를 가리키면 거절
+    except (OSError, ValueError):
+        return False
 
 
 def _is_block(e, h):
@@ -1294,9 +1340,25 @@ def after_of(cfg, ev1, ev2):
 
 def cmd_after(cfg, out, run):
     if N_RUN_RE.fullmatch(run):
-        if not n_dir_ok(out):
+        if not n_dir_ok(out, cfg):
             print('%s 폴더에만 씀' % N_SUB)
             return 2
+        name = os.path.basename(os.path.normpath(str(out)))
+        if name == N_SUB:                                 # kit091 길은 small_n를 엄격히 읽지 않는다
+            rn = cfg.get('round_n') if isinstance(cfg, dict) else None
+            in_round = isinstance(rn, list) and any(isinstance(r, list) and r and r[0] == run for r in rn)
+            if not in_round and any(r[0] == run for rows in _small_loose(cfg).values() for r in rows):
+                print('그 폴더의 실행이 아님')
+                return 2
+        else:
+            try:
+                sm = _small_n(cfg)
+            except ValueError as e:
+                print(str(e))             # _small_n의 글은 고정 글(공백을 그대로 둔다)
+                return 2
+            if run not in sm[name]['rows']:
+                print('그 폴더의 실행이 아님')
+                return 2
     elif not y_dir_ok(out):
         print('%s 폴더에만 씀' % Y_SUB)
         return 2
@@ -1765,8 +1827,41 @@ def _help(old, new):
     return '나빠짐'
 
 
+def _n_rows(cfg, out):
+    """(rows, order, redo, small|None). kit091이면 지금 그대로 · 작은 차례 폴더면 kit091 줄에 작은 차례 줄을 합친 한 벌이다."""
+    if os.path.basename(os.path.normpath(str(out))) == N_SUB:
+        return (*_round_n(cfg), None)
+    p = _small_prior(cfg, out)
+    return p['rows'], p['order'], p['redo'], p['small']
+
+
+def _n_read(cfg, out, order, small):
+    """(kinds, extra, walks, afters, chks). 작은 차례면 차례 안 실행은 kit091에서, 작은 차례 실행은 그 폴더에서만 읽고 읽기만 한다."""
+    kinds, walks, afters, chks = {}, {}, {}, {}
+    if small is None:
+        rows, extra = load_rows(cfg, out, N_RUN_RE)
+        kinds = {r['run']: r['kinds'] for r in rows}
+        sources = [(out, order)]
+    else:
+        extra = {}
+        sources = [(small['base'], [r for r in order if r not in small['own']]), (out, [r for r in order if r in small['own']])]
+        for folder, names in sources:
+            rows, ex = load_rows(cfg, folder, N_RUN_RE)       # 폴더마다 한 번 · 그 폴더의 eye.json이 붙는다
+            kinds.update({r['run']: r['kinds'] for r in rows if r['run'] in names})
+            extra.update({k: v for k, v in ex.items() if k in names})
+    for folder, names in sources:
+        for r in names:
+            walks[r] = _jload(os.path.join(folder, r + '.walk.json'))
+            afters[r] = _jload(os.path.join(folder, r + '.after.json'))
+            try:
+                chks[r] = read_check(os.path.join(folder, r + '.check'))
+            except OSError:
+                chks[r] = None
+    return kinds, extra, walks, afters, chks
+
+
 def compare_n(cfg, out):
-    rows_n, order, redo = _round_n(cfg)
+    rows_n, order, redo, small = _n_rows(cfg, out)
     for key in ('g3_exits_n', 'void_exits'):
         if not isinstance(cfg.get(key), list):
             raise ValueError('%s가 없음' % key)
@@ -1783,16 +1878,7 @@ def compare_n(cfg, out):
     used = [r for r in order if rows_n[r][1] != 'z0' and r not in redo]
     new_all = [r for r in used if r[0] == 'n']
     z0 = [r for r in order if rows_n[r][1] == 'z0' and r not in redo]
-    rows, extra = load_rows(cfg, out, N_RUN_RE)
-    kinds = {r['run']: r['kinds'] for r in rows}
-    walks, afters, chks = {}, {}, {}
-    for r in order:
-        walks[r] = _jload(os.path.join(out, r + '.walk.json'))
-        afters[r] = _jload(os.path.join(out, r + '.after.json'))
-        try:
-            chks[r] = read_check(os.path.join(out, r + '.check'))
-        except OSError:
-            chks[r] = None
+    kinds, extra, walks, afters, chks = _n_read(cfg, out, order, small)
 
     def void(r):
         return r in extra and bool(extra[r]['void_reason'])
@@ -2038,13 +2124,17 @@ def compare_n(cfg, out):
     else:
         j = '남긴다'
     c['judgment'] = j
+    if small:
+        c['small'] = {'sub': small['sub'], 'fills': small['fills']}
+        notes.append('작은 차례 %s: %s · 넷째 차례 값은 읽기만'
+                     % (small['sub'], ', '.join('%s 자리를 %s로 채움' % (o, n) for o, n in sorted(small['fills'].items()))))
     c['notes'] = notes
     return c
 
 
 def compare_n_text(c):
     dump = lambda v: json.dumps(v, ensure_ascii=False)
-    lines = ['## 넷째 차례 견주기']
+    lines = ['## 작은 차례 견주기(%s)' % c['small']['sub'] if c.get('small') else '## 넷째 차례 견주기']
     for n in ('R1', 'R2'):
         t = c[n]
         lines.append('- %s 실행=%s 닿음=%s → %s' % (n, dump(t['runs']), dump(t['reached']), t['result']))
@@ -2082,7 +2172,9 @@ def cmd_compare_n(cfg, out):
     except (OSError, ValueError):
         print('%s 폴더를 못 풂' % N_SUB)
         return 2
-    if not n_dir_ok(real) or os.path.basename(os.path.dirname(real)) != 'out-done':
+    given, realname = os.path.basename(os.path.normpath(str(out))), os.path.basename(real)
+    if (not n_dir_ok(real, cfg) or os.path.basename(os.path.dirname(real)) != 'out-done'
+            or (given != realname and (SMALL_RE.fullmatch(given) or SMALL_RE.fullmatch(realname)))):   # 작은 차례 이름의 링크 · 거꾸로 꼴도
         print('%s 폴더에만 씀(out-done 아래)' % N_SUB)
         return 2
     if not os.path.isdir(real):
@@ -2126,6 +2218,73 @@ def _round_n(cfg):
                 or rows[old][1:] != rows[new][1:]):
             raise ValueError('redo_n가 틀림')
     return rows, order, redo
+
+
+def _small_n(cfg):
+    """small_n 엄격 검사 · {이름: {'rows': {run: 줄}, 'order': [run…], 'fills': {옛: 새}}}. 작은 차례를 실제로 다루는 길에서만 부른다."""
+    sm = cfg.get('small_n')
+    if sm is None:
+        return {}
+    rows_n, _order_n, redo_n = _round_n(cfg)
+    bad = ValueError('small_n가 틀림')
+    if not isinstance(sm, dict):
+        raise bad
+    out, seen_runs, filled = {}, set(rows_n), set()
+    for name, item in sm.items():
+        if not (isinstance(name, str) and SMALL_RE.fullmatch(name) and isinstance(item, dict) and set(item) == {'round', 'fills'}):
+            raise bad
+        rr, fills = item['round'], item['fills']
+        if not isinstance(rr, list) or not rr or not isinstance(fills, dict) or not fills:
+            raise bad
+        rows, order = {}, []
+        for r in rr:
+            if not (isinstance(r, list) and len(r) == 3 and all(isinstance(x, str) for x in r) and re.fullmatch(r'n[0-9]{2}', r[0])
+                    and int(r[0][1:]) <= 19 and r[1] != 'z0' and r[0] not in seen_runs):
+                raise bad
+            rows[r[0]] = list(r)
+            order.append(r[0])
+            seen_runs.add(r[0])
+        if not all(isinstance(k, str) and isinstance(v, str) for k, v in fills.items()):
+            raise bad
+        vals = list(fills.values())
+        if len(set(map(str, vals))) != len(vals) or set(vals) != set(order):
+            raise bad
+        for old, new in fills.items():
+            if not (isinstance(old, str) and old in rows_n and old[0] == 'n' and old not in redo_n and old not in filled
+                    and rows_n[old][1:] == rows[new][1:]):
+                raise bad
+            filled.add(old)
+        out[name] = {'rows': rows, 'order': order, 'fills': dict(fills)}
+    return out
+
+
+def _small_prior(cfg, out):
+    """작은 차례 폴더 `out`을 다루기 전의 앞 검사(돈·파일을 만들기 전에 compare-n과 next-n이 같이 부른다). 어기면 ValueError.
+    돌려주는 값은 compare-n이 쓰는 한 벌 — rows·order·redo는 kit091 줄에 작은 차례 줄을 합친 것이고 small은 덧붙임·읽는 곳 정보다."""
+    out = os.path.abspath(str(out))
+    name = os.path.basename(out)
+    sm = _small_n(cfg)
+    if name not in sm:
+        raise ValueError('small_n에 없는 폴더: %s' % one(name))
+    s = sm[name]
+    rows_n, order_n, redo_n = _round_n(cfg)
+    base = os.path.join(os.path.dirname(out), N_SUB)
+    if (not os.path.isdir(base) or os.path.islink(base) or os.path.realpath(base) == os.path.realpath(out)):
+        raise ValueError('%s 폴더가 없음(작은 차례 옆)' % N_SUB)
+    prior = _jload(os.path.join(base, 'compare.json'))
+    if not isinstance(prior, dict):
+        raise ValueError('%s/compare.json이 없음 — 넷째 차례를 먼저 닫을 것' % N_SUB)
+    if prior.get('judgment') != '미룸(G1)':
+        raise ValueError('넷째 차례 판정이 미룸(G1)이 아님: %s' % one(str(prior.get('judgment'))))
+    g = prior.get('G1')
+    new = g.get('new') if isinstance(g, dict) else None
+    if not isinstance(new, list) or not new or any(not isinstance(x, str) for x in new):
+        raise ValueError('넷째 차례 G1.new를 못 읽음')
+    miss = [x.split(':', 1)[0] for x in new if x.split(':', 1)[0] not in s['fills']]
+    if miss:
+        raise ValueError('G1에 걸린 실행이 fills에 없음: %s' % one(', '.join(miss)))
+    return {'rows': {**rows_n, **s['rows']}, 'order': order_n + s['order'], 'redo': {**redo_n, **s['fills']},
+            'small': {'sub': name, 'fills': dict(s['fills']), 'base': base, 'own': set(s['order'])}}
 
 
 def _sha_line(path, key):
@@ -2196,7 +2355,17 @@ def _copy_gate(cfg):
 
 
 def next_n(cfg, kd):
-    rows, order, redo = _round_n(cfg)
+    # 작은 차례 길은 _run_key를 쓰지 않는다(`'rvxwy'.index`라 n에서 터짐) — sorted()만 쓴다.
+    small = None
+    name = os.path.basename(os.path.normpath(str(kd)))
+    if name == N_SUB:                                     # kit091 길은 small_n를 엄격히 읽지 않는다
+        rows, order, redo = _round_n(cfg)
+    else:
+        sm = _small_n(cfg)
+        if name not in sm:
+            raise ValueError('small_n에 없는 폴더: %s' % one(name))
+        small = sm[name]
+        rows, order, redo = small['rows'], small['order'], {}
     for key in ('g3_exits_n', 'void_exits'):
         if not isinstance(cfg.get(key), list):
             raise ValueError('%s가 없음' % key)
@@ -2285,6 +2454,31 @@ def next_n(cfg, kd):
         return _stuck(gate) if gate else fin('copy', why='kit-n.sha의 사본 지문이 kit-y.sha와 같음 — 사본을 새로 뜨지 않았음')
     if nkit != nsha or nsha != _kitsha_now(cfg.get('kit')):
         return _stuck('kit-n.sha의 kit 줄·copy 줄·지금 꾸러미 지문이 다름 — 섞인 사본일 수 있음')
+    if small is not None:
+        try:                                              # 돈·파일을 만들기 전에 막는다(turn-n도 여기를 지남)
+            _small_prior(cfg, kd)
+        except ValueError as e:
+            return _stuck(str(e))
+        base, rows_n = os.path.join(od, N_SUB), _round_n(cfg)[0]
+        for old in sorted(small['fills']):
+            if (not os.path.isfile(os.path.join(base, old + '.check'))
+                    or not (_bad_run(cfg, base, old, rows_n[old][1]) or '').startswith('무효:')):
+                return _stuck('채울 자리의 옛 실행이 무효가 아님: %s' % old)
+        for r in live:                                    # 작은 차례는 다시 돌리지 않는다
+            b = bad(r)
+            if not b:
+                try:
+                    t2 = read_check(os.path.join(kd, r + '.check')).get('t2')
+                except OSError:
+                    t2 = None
+                if t2 != 'sent':
+                    b = 't2 %s' % (one(str(t2)) if t2 is not None else '없음')
+            if b:
+                return _stuck('작은 차례는 다시 돌리지 않음 — %s %s' % (r, b))
+        pn = pick('n')
+        if pn is None:
+            return fin('done', why='compare-n 차례')
+        return orphan(pn) or fin(pn['state'], pn['run'])
     g1 = '미룸(G1) · 남은 n을 돌리지 않음 · 무효로 볼 일이면 설정 void에 까닭을 적고 redo_n에 짝'
     for r in live:
         if r[0] != 'n':
@@ -2335,7 +2529,7 @@ def _copy_line(cfg, od):
 
 
 def cmd_next_n(cfg, kd):
-    if not n_dir_ok(kd):
+    if not n_dir_ok(kd, cfg):
         print('%s 폴더만 봄' % N_SUB)
         return 2
     try:
@@ -2361,7 +2555,7 @@ def cmd_next_n(cfg, kd):
 
 
 def cmd_turn_n(cfg, kd, run):
-    if not n_dir_ok(kd):
+    if not n_dir_ok(kd, cfg):
         print('%s 폴더만 봄' % N_SUB)
         return 2
     if not N_RUN_RE.fullmatch(run):
@@ -2380,6 +2574,25 @@ def cmd_turn_n(cfg, kd, run):
 
 # ---------- order · text · cfg ----------
 
+def cmd_sub_n(cfg, run):
+    """그 실행의 값 폴더 이름을 찍는다. round_n 실행은 엄격 검사 없이 kit091, 작은 차례 실행만 small_n를 엄격히 읽는다."""
+    rn = cfg.get('round_n')
+    if isinstance(rn, list) and any(isinstance(r, list) and r and r[0] == run for r in rn):
+        print(N_SUB)
+        return 0
+    for name, rows in _small_loose(cfg).items():
+        if any(r[0] == run for r in rows):
+            try:
+                sm = _small_n(cfg)
+            except ValueError as e:
+                print(str(e))
+                return 2
+            print(name if name in sm else 'small_n가 틀림')
+            return 0 if name in sm else 2
+    print('차례에 없는 실행')
+    return 2
+
+
 def cmd_order(cfg, run, task, arm):
     for r in cfg['order']:
         if list(r) == [run, task, arm]:
@@ -2396,6 +2609,10 @@ def cmd_order(cfg, run, task, arm):
     for r in cfg.get('round_n', []):
         if list(r[:3]) == [run, task, arm]:
             return 0
+    for rows in _small_loose(cfg).values():               # 검사는 하지 않는다(엄격 검사는 작은 차례 길의 몫)
+        for r in rows:
+            if list(r[:3]) == [run, task, arm]:
+                return 0
     print('차례에 없는 짝: %s %s %s' % (one(run), one(task), one(arm)))
     return 2
 
@@ -2437,7 +2654,7 @@ def main(argv):
     except Exception:
         pass
     if len(argv) < 2:
-        print('쓰는 법: stage.py order|text|cfg|count|table|judge|after|compare|next-n|turn-n|compare-n <tasks.json> …')
+        print('쓰는 법: stage.py order|text|cfg|count|table|judge|after|compare|next-n|turn-n|sub-n|compare-n <tasks.json> …')
         return 2
     cmd, tpath, rest = argv[0], argv[1], argv[2:]
     try:
@@ -2447,6 +2664,8 @@ def main(argv):
         return 2
     if cmd == 'order' and len(rest) == 3:
         return cmd_order(cfg, *rest)
+    if cmd == 'sub-n' and len(rest) == 1:
+        return cmd_sub_n(cfg, rest[0])
     if cmd == 'text' and len(rest) == 2:
         return cmd_text(tpath, cfg, *rest)
     if cmd == 'cfg' and len(rest) == 1:
@@ -2458,6 +2677,13 @@ def main(argv):
                 print('인자가 틀림')
                 return 2
             repo = rest[3]
+        try:                                              # 값 폴더(out-done 아래)는 다시 세지 않는다 — 저장된 net이 새 셈으로 덮이지 않게
+            parts = os.path.realpath(str(rest[0])).split(os.sep)
+        except (OSError, ValueError):
+            parts = ['out-done']
+        if 'out-done' in parts:
+            print('값 폴더는 다시 세지 않음')
+            return 2
         try:
             d, fail = count_run(cfg, rest[0], rest[1], repo)
         except (OSError, GitError) as e:
@@ -2484,8 +2710,18 @@ def main(argv):
     if cmd == 'turn-n' and len(rest) == 2:
         return cmd_turn_n(cfg, *rest)
     if cmd == 'judge' and len(rest) == 1:
-        if n_dir_ok(rest[0]):
-            print('%s 폴더는 judge 안 함 — compare-n' % N_SUB)
+        hit = None
+        for cand in (str(rest[0]), None):
+            if cand is None:
+                try:
+                    cand = os.path.realpath(str(rest[0]))        # 링크를 따라간 길도 본다
+                except (OSError, ValueError):
+                    break
+            if n_dir_ok(cand, cfg):
+                hit = cand
+                break
+        if hit is not None:
+            print('%s 폴더는 judge 안 함 — compare-n' % os.path.basename(os.path.normpath(hit)))
             return 2
         rows, _ = load_rows(cfg, rest[0])
         j = judge(rows, cfg)

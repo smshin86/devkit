@@ -50,10 +50,31 @@ def work_root(cfg):
     return os.environ.get("STAGE_X") or cfg["work"]
 
 
+SMALL_RE = re.compile(r"kit091[a-z]")   # 작은 차례의 값 폴더 이름 — stage.py의 SMALL_RE와 같다
+
+
+def small_rounds(cfg):
+    """small_n를 예외 없이 너그럽게 읽는다 · {차례 이름: [실행 줄…]}. 검사는 stage.py 한 곳(_small_n)이 하고, 걸음 도구는 stage.sh가 거른 뒤에 불린다."""
+    sm = cfg.get("small_n") if isinstance(cfg, dict) else None
+    if not isinstance(sm, dict):
+        return {}
+    out = {}
+    for name, item in sm.items():
+        if not (isinstance(name, str) and SMALL_RE.fullmatch(name) and isinstance(item, dict)):
+            continue
+        rr = item.get("round")
+        out[name] = [r for r in (rr if isinstance(rr, list) else []) if isinstance(r, list) and r and isinstance(r[0], str)]
+    return out
+
+
 def task_of(cfg, run):
     for key in ("order", "zero", "rerun", "round_y", "round_n"):
         for row in cfg.get(key, []):
             if row and row[0] == run:
+                return row[1]
+    for rows in small_rounds(cfg).values():                 # round_n이 먼저이므로 겹치면 round_n이 이긴다
+        for row in rows:
+            if len(row) > 1 and row[0] == run:
                 return row[1]
     return None
 
@@ -1547,7 +1568,7 @@ def cmd_walk_b(cfg, S, R, run, base, sub=None):
     key = "base-" + base if base else run
     result_path = walk_json_path(R, key, sub)
     check_y_sub(run, base, sub)
-    check_n_sub(run, base, sub)
+    check_n_sub(run, base, sub, cfg)
     if not base:
         check_first_ruler_open(R, run, sub)
     port = walk_port(cfg, run, base)
@@ -1717,7 +1738,8 @@ def safe_check(py, copy, values, cap):
 
 def cmd_check_c(cfg, S, R, run, base, with_fix, sub=None):
     check_y_sub(run, base, sub)
-    check_n_sub(run, base, sub)
+    check_n_sub(run, base, sub, cfg)
+    out_dir(R, sub)   # 링크 거절을 폴더 만들기 앞으로
     task = base or task_of(cfg, run)
     if task not in ("c1", "c2"):
         raise WalkError("c 일감이 아님: %s" % (run or base))
@@ -1793,7 +1815,7 @@ def a_scenes(cfg, task):
 
 def blank_a(cfg, R, run, sub=None):
     check_y_sub(run, None, sub)
-    check_n_sub(run, None, sub)
+    check_n_sub(run, None, sub, cfg)
     task = task_of(cfg, run)
     scenes = a_scenes(cfg, task)
     path = walk_json_path(R, run, sub) if sub is not None else os.path.join(R, "out-done", run + ".walk.json")
@@ -1817,7 +1839,10 @@ def out_dir(R, sub=None):
         return os.path.join(R, "out-done")
     if not SUB_RE.fullmatch(sub):
         raise WalkError("--sub 이름이 틀림: %r" % sub)
-    return os.path.join(R, "out-done", sub)
+    path = os.path.join(R, "out-done", sub)
+    if SMALL_RE.fullmatch(sub) and os.path.islink(path):
+        raise WalkError("%s가 링크 — 진짜 폴더여야 함" % sub)
+    return path
 
 
 def walk_json_path(R, run, sub=None):
@@ -1843,8 +1868,22 @@ def check_y_sub(run, base, sub):
 N_SUB = "kit091"
 
 
-def check_n_sub(run, base, sub):
-    """m·n 실행과 b4 바탕은 값 폴더 kit091 로만 부르고, kit091 에는 그 둘만 쓴다 — 어기면 아무것도 쓰기 전에 멈춘다."""
+def check_n_sub(run, base, sub, cfg=None):
+    """m·n 실행과 b4 바탕은 값 폴더 kit091 로만 부르고, kit091 에는 그 둘만 쓴다 — 어기면 아무것도 쓰기 전에 멈춘다.
+    cfg가 있으면 small_n의 작은 차례 실행은 그 차례 폴더(kit091c …)로만 부르고, 그 폴더에는 그 차례의 실행만 쓴다."""
+    if cfg is not None:
+        smalls = small_rounds(cfg)
+        rn = cfg.get("round_n")
+        rn_runs = {r[0] for r in rn if isinstance(r, list) and r} if isinstance(rn, list) else set()
+        home = None
+        if run and run not in rn_runs:
+            home = next((name for name, rows in smalls.items() if any(r[0] == run for r in rows)), None)
+        if home is not None:
+            if sub != home:
+                raise WalkError("%s는 작은 차례 실행 — --sub %s 로 부른다" % (run, home))
+            return
+        if sub in smalls:
+            raise WalkError("%s에는 그 작은 차례의 실행만" % sub)
     if (run and re.fullmatch(r"[mn][0-9]+", run)) or base == "b4":
         if sub != N_SUB:
             raise WalkError("m·n 실행과 b4 바탕은 --sub %s 로 부른다" % N_SUB)
@@ -1868,7 +1907,7 @@ def cmd_tests_a(cfg, S, R, run, sub=None):
     if sub is not None and not os.path.isfile(wpath):
         raise WalkError("둘째 자 폴더에 walk.json이 없음 — 1차 파일을 먼저 복사: %s" % wpath)
     check_y_sub(run, None, sub)
-    check_n_sub(run, None, sub)
+    check_n_sub(run, None, sub, cfg)
     check_first_ruler_open(R, run, sub)
     src = os.path.join(S, "done", run, "w")
     if not os.path.isdir(src):
@@ -2008,6 +2047,15 @@ def main(argv=None):
     if getattr(a, "sub", None) is not None and not SUB_RE.fullmatch(a.sub):
         ap.error("--sub는 [a-z0-9]+만")
     if a.cmd in ("blank-a", "check-c") and getattr(a, "sub", None) not in (None, Y_SUB, N_SUB):
+        try:
+            smalls = small_rounds(load_cfg())
+        except (OSError, ValueError):
+            smalls = {}
+        if a.sub not in smalls:
+            if smalls:
+                ap.error("%s의 --sub는 %s · %s · %s만" % (a.cmd, Y_SUB, N_SUB, " · ".join(sorted(smalls))))
+            ap.error("%s의 --sub는 %s 또는 %s만" % (a.cmd, Y_SUB, N_SUB))
+    if a.cmd in ("walk-b", "tests-a") and getattr(a, "sub", None) is not None and SMALL_RE.fullmatch(a.sub):
         ap.error("%s의 --sub는 %s 또는 %s만" % (a.cmd, Y_SUB, N_SUB))
     if a.cmd in ("walk-b", "check-c"):
         if bool(a.run) == bool(a.base):

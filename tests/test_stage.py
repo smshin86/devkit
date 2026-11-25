@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -3607,3 +3608,661 @@ def test_compare_n_refuses_nested_missing_and_bad_cfg(st, tasks, tmp_path):
         del bad[key]
         assert st.cmd_compare_n(bad, str(out)) == 2, key
         assert not (out / "compare.json").exists()
+
+
+# ---------- net 세는 법: 망 도구 낱말이 있는 명령의 주소만 센다(D1) ----------
+
+HD = "python - <<'EOF'\nimport json\nu = 'http://example.com'\nprint(json.dumps(u))\nEOF"
+NET_NOT = [
+    HD,
+    HD + "\ngit diff",
+    HD + " && git status",
+    "python3 -c \"from urllib.parse import urlparse; print(urlparse('https://example.org/x').netloc)\"",
+    "python3 -c \"Prefetch('x'); u = 'https://example.org/x'\"",
+    "python3 -c \"qs.prefetch_related('x'); u = 'https://example.org/x'\"",
+    'python - <<\'EOF\'\nfor v in ["ftp://example.com/x", "https://example.com"]:\n    print(v)\nEOF',
+    'git commit -m "docs: link http://example.com/a"',
+    'git log --oneline --grep "http://example.com"',
+    'echo "REQUIRE http://example.com"',
+    "printf '%s\\n' \"Docs: http://example.com/download\"",
+    "git --no-pager grep -n fetch -- 'http://example.com'",
+    "git -P log -n 5 --grep push --format='%s http://example.com'",
+    "git --no-pager diff --stat remote.py http://example.com",
+    'git commit -m "HTTP Requests. Refs https://example.com/a"',
+    'git commit -m "Docs: GH #12 https://example.com/a"',
+    'echo "SSH: https://example.com/a"',
+    'echo "See the Snap docs at https://example.com/a"',
+    "Curl https://example.org/x",
+]
+NET_YES = [
+    "curl https://example.org/x",
+    "python -c \"import urllib.request; urllib.request.urlopen('https://example.org')\"",
+    "git clone https://example.org/r.git",
+    "node -e \"fetch('https://example.org')\"",
+    "curl http://localhost:8000/?u=https://example.org",
+    "node -e \"require('https').get('https://example.org/x', r => r.resume())\"",
+    "node -e \"require('node:https').get('https://example.org/x')\"",
+    "node -e \"const h=require('http'); h.get('http://example.org/x')\"",
+    "git --no-pager fetch https://example.org/r.git",
+    "git --git-dir=x/.git fetch https://example.org/r.git",
+    "invoke-webrequest https://example.org/x",
+    "powershell -c \"(New-Object Net.WebClient).DownloadString('https://example.org/x')\"",
+    "php -r \"echo file_get_contents('https://example.org/x');\"",
+    "uvx --from https://example.org/p.whl tool",
+    "node -e \"require ('https').get('https://example.org/x')\"",
+    "node -e \"require(`https`).get('https://example.org/x')\"",
+    "node -e \"import('https').then(h => h.get('https://example.org/x'))\"",
+    "git -C d -c a=b --no-pager pull https://example.org/r.git",
+    "git -C - pull https://example.org/r.git",
+]
+
+
+@pytest.mark.parametrize("cmd", NET_NOT)
+def test_net_count_url_needs_net_word(st, tasks, cmd):
+    assert st.net_count([asst(bash=cmd)]) == (0, 0)
+    assert st.net_count([asst(bash=cmd)], tasks["pkg_hosts"]) == (0, 0)
+
+
+@pytest.mark.parametrize("cmd", NET_YES)
+def test_net_count_net_word_counts_as_before(st, cmd):
+    assert st.net_count([asst(bash=cmd)]) == (1, 0)
+
+
+def test_net_word_re_boundaries(st):
+    yes = ["curl x", "/usr/bin/curl x", "apt-get install x", "apt install x", "pip3 install x", "python3 -m pip install x",
+           "python3.11 -m pip install x", "go get x", "git ls-remote x", "git submodule update", "x | nc host 80",
+           "window.fetch (u)", "requests.get(u)", "Invoke-WebRequest u", "uv pip install x", "docker pull x"]
+    no = ["rsyncx", "sync x", "func x", ".ssh/config", "ssh_config", "bundle x", "pip list", "git diff", "git log", "go build",
+          "python -m pytest", "Prefetch(x)", "prefetch_related(x)", "urllib.parse", "my-curl x", "curl-config",
+          "gems x", "uvicorn x", "CURL x"]
+    for w in yes:
+        assert st.NET_WORD_RE.search(w), w
+    for w in no:
+        assert not st.NET_WORD_RE.search(w), w
+
+
+def test_net_word_re_scheme_and_wide_forms(st):
+    yes = ["curl ftp://example.org/x", "lftp ftp://example.org", "ftp example.org", "wget2 -q https://example.org",
+           "python3.11 -m pip install x", "python3 -mpip download x", "pip3.11 install x",
+           "git -C repo fetch https://example.org/r.git", "git -c a.b=1 clone https://example.org/r",
+           "import requests\nrequests.get('https://example.org')", 'python -c "from requests import get"',
+           "exec 3<>/dev/tcp/example.org/80", "/usr/bin/curl -s https://example.org"]
+    no = ['for v in ["ftp://example.com/x", "ftps://example.com", "https://example.com"]:', "echo 'ssh://example.org/r' > f",
+          "grep -n 'rsync://' x", "echo telnet://example.org", "cat docs/sftp-notes.md", "echo curly", "ls my-curl",
+          "pip list", "git status", "git log --oneline", "echo npm-run"]
+    for w in yes:
+        assert st.NET_WORD_RE.search(w), w
+    for w in no:
+        assert not st.NET_WORD_RE.search(w), w
+
+
+def test_net_word_re_no_backtrack_blowup():
+    code = (
+        "import importlib.util, sys, time\n"
+        "spec = importlib.util.spec_from_file_location('stage_mod', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(m)\n"
+        "texts = ['git' + ' -a x' * 20000, 'git' + ' --opt' * 20000, 'git' + ' -c' * 20000,\n"
+        "         'git -a ' * 4000, 'git -C ' * 4000, ('git' + ' -c' * 13 + ' ') * 2000,\n"
+        "         ('git' + ' -c x' * 13 + ' ') * 2000, 'require(' * 20000,\n"
+        "         'require' + ' ' * 100000 + '(', 'import' + ' ' * 100000]\n"
+        "for t in texts:\n"
+        "    t0 = time.monotonic()\n"
+        "    m.NET_WORD_RE.search(t)\n"
+        "    if time.monotonic() - t0 > 2:\n"
+        "        sys.exit(3)\n"
+    )
+    try:
+        r = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(M / "stage.py")], timeout=30)
+    except subprocess.TimeoutExpired:
+        pytest.fail("NET_WORD_RE 되돌아가기 폭주(30초 넘김)")
+    assert r.returncode == 0, r.returncode
+
+
+def test_net_count_never_above_old(st, tasks):
+    def old(cmd, hosts):
+        net = pkg = 0
+        for m in re.finditer(r'https?://([^/\s:\'"?#]+)', cmd):
+            host = m.group(1).lower()
+            if host in ('localhost', '127.0.0.1'):
+                continue
+            if any(host == h or host.endswith('.' + h) for h in hosts):
+                pkg += 1
+            else:
+                net += 1
+        return net, pkg
+
+    for hosts in ((), tuple(tasks["pkg_hosts"])):
+        for cmd in NET_NOT + NET_YES:
+            n, p = st.net_count([asst(bash=cmd)], hosts)
+            o_n, o_p = old(cmd, hosts)
+            assert n <= o_n and p <= o_p, cmd
+        for cmd in NET_YES:
+            assert st.net_count([asst(bash=cmd)], hosts) == old(cmd, hosts), cmd
+
+
+def test_count_cli_refuses_value_folder(tmp_path, tasks):
+    r, out, base, end = count_setup(tmp_path, tasks)
+    for rel in ("S/out-done/kit091", "S/out-done"):
+        dst = tmp_path / rel
+        shutil.copytree(out, dst)
+        rc, txt = run("count", TASKS, dst, "r05", "--repo", r)
+        assert rc == 2 and "값 폴더는 다시 세지 않음" in txt, rel
+        assert not (dst / "r05.json").exists(), rel
+        shutil.rmtree(tmp_path / "S")
+    rc, _ = run("count", TASKS, out, "r05", "--repo", r)
+    assert rc == 0 and (out / "r05.json").exists()
+
+
+# ---------- 작은 차례(small_n): 설정 · 폴더 · 실행 갈래(D2 · D3) ----------
+
+SM_G = {"round": [["n10", "c2", "p"]], "fills": {"n06": "n10"}}                 # n_cfg_mem 줄에서 n06이 c2다
+GOOD_MEM = {"kit091c": SM_G}
+D2 = {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}}         # 설계 본보기 — round_n에 n09가 없으면 틀린 설정
+SM_BAD_FILLS = {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n05": "n10"}}}   # 너그럽게는 읽히고 엄격 검사에서 걸림
+SM_PRIOR = {"judgment": "미룸(G1)", "G1": {"new": ["n06:무효 exit97"]}}
+
+
+def _sm(round_, fills):
+    return {"kit091c": {"round": round_, "fills": fills}}
+
+
+SM_BAD = [
+    ({"kit091": SM_G}, False),
+    ({"kit091C": SM_G}, False),
+    ({"kit091cc": SM_G}, False),
+    ({"kit091c": []}, False),
+    ({"kit091c": {"round": SM_G["round"]}}, False),
+    ({"kit091c": dict(SM_G, note="x")}, False),
+    (_sm([], {"n06": "n10"}), False),
+    (_sm([["n10", "z0", "p", "c2"]], {"n06": "n10"}), False),
+    (_sm([["m10", "c2", "p"]], {"n06": "m10"}), False),
+    (_sm([["n20", "c2", "p"]], {"n06": "n20"}), False),
+    (_sm([["n10", "z0", "p"]], {"n06": "n10"}), False),
+    (_sm([["n05", "c2", "p"]], {"n06": "n05"}), False),
+    (_sm([["n10", "c2", "p"]], {"n12": "n10"}), False),
+    (_sm([["n10", "b4", "p"]], {"m01": "n10"}), False),
+    (_sm([["n10", "c2", "p"]], {"n06": "n11"}), False),
+    (_sm([["n10", "c2", "p"], ["n11", "c2", "p"]], {"n06": "n10"}), False),
+    (_sm([["n10", "c2", "p"]], {"n06": "n10", "n05": "n10"}), False),
+    (_sm([["n10", "c1", "p"]], {"n06": "n10"}), False),
+    (_sm([["n10", "c2", "q"]], {"n06": "n10"}), False),
+    (_sm([["n10", "c2", "p"]], {}), False),
+    ({"kit091c": SM_G, "kit091d": {"round": [["n11", "c2", "p"]], "fills": {"n06": "n11"}}}, False),
+    ({"kit091c": SM_G, "kit091d": {"round": [["n10", "c1", "p"]], "fills": {"n05": "n10"}}}, False),
+    ([], False),
+    ({"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": ["n10"]}}}, False),                      # fills 값이 글자가 아님
+    ({"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": 10}}}, False),
+    (GOOD_MEM, True),                                                          # redo_n의 열쇠를 채움
+]
+
+
+@pytest.mark.parametrize("bad,redo", SM_BAD)
+def test_small_n_validation(st, tasks, bad, redo):
+    cfg = n_cfg_mem(tasks)
+    if redo:
+        cfg["round_n"].append(["n09", "c2", "p"])
+        cfg["redo_n"] = {"n06": "n09"}
+    cfg["small_n"] = copy.deepcopy(bad)
+    with pytest.raises(ValueError, match="small_n가 틀림"):
+        st._small_n(cfg)
+
+
+def test_small_n_reads_good(st, tasks):
+    cfg = n_cfg_mem(tasks)
+    cfg.pop("small_n", None)
+    assert st._small_n(cfg) == {}
+    cfg["small_n"] = copy.deepcopy(GOOD_MEM)
+    assert st._small_n(cfg) == {"kit091c": {"rows": {"n10": ["n10", "c2", "p"]}, "order": ["n10"], "fills": {"n06": "n10"}}}
+    cfg["round_n"].append(["n09", "c2", "p"])
+    cfg["redo_n"] = {"n06": "n09"}
+    cfg["small_n"] = copy.deepcopy(D2)
+    assert st._small_n(cfg)["kit091c"]["fills"] == {"n09": "n10"}
+
+
+def test_small_n_real_config_shape(st, tasks):
+    _skip_unless(tasks, "small_n")
+    got = st._small_n(tasks)
+    assert all(st.SMALL_RE.fullmatch(k) for k in got)
+
+
+def test_small_loose_never_raises(st):
+    assert st._small_loose({}) == {} and st._small_loose({"small_n": 5}) == {} and st._small_loose({"small_n": "x"}) == {}
+    assert st._small_loose({"small_n": {"kit091c": 5, "kit091": {}, "kit091C": {}, 3: {}}}) == {}
+    assert st._small_loose({"small_n": {"kit091c": {"round": "x"}}}) == {"kit091c": []}
+    assert st._small_loose({"small_n": {"kit091c": {"round": [["n10", "c2", "p"], [], [3], "x"]}}}) == {"kit091c": [["n10", "c2", "p"]]}
+
+
+def test_n_dir_ok_small_round(st, tmp_path):
+    cfg = {"small_n": {"kit091c": {}}}
+    assert st.n_dir_ok(str(tmp_path / "kit091c")) is False
+    for d in ("kit091c", "kit091c/"):
+        assert st.n_dir_ok(str(tmp_path / d), cfg) is True
+    assert st.n_dir_ok(str(tmp_path / "kit091d"), cfg) is False
+    assert st.n_dir_ok(str(tmp_path / "kit091"), {"small_n": 5}) is True
+    for c in ({"small_n": 5}, {}):
+        assert st.n_dir_ok(str(tmp_path / "kit091c"), c) is False
+    assert st.n_dir_ok(str(tmp_path / "kit09c"), {"small_n": {"kit09c": {}}}) is False
+    (tmp_path / "other").mkdir()
+    try:
+        (tmp_path / "link").mkdir()
+        (tmp_path / "link" / "kit091c").symlink_to(tmp_path / "other", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("심볼릭 링크를 못 만드는 파일 시스템")
+    assert st.n_dir_ok(str(tmp_path / "link" / "kit091c"), cfg) is False         # 작은 차례 이름의 링크가 다른 폴더를 가리킴
+
+
+def _sub_n_file(tmp_path, tasks, small=None, drop=False):
+    cfg = dict(tasks, round_n=[["n00", "z0", "p", "a1"], ["n01", "c2", "p"]], redo_n={},
+               small_n=small if small is not None else {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n01": "n10"}}})
+    if drop:
+        del cfg["small_n"]
+    f = tmp_path / "t.json"
+    f.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    return f
+
+
+def test_sub_n_cli(tmp_path, tasks):
+    f = _sub_n_file(tmp_path, tasks)
+    assert run("sub-n", f, "n01") == (0, "kit091\n") and run("sub-n", f, "n00") == (0, "kit091\n")
+    assert run("sub-n", f, "n10") == (0, "kit091c\n")
+    assert run("sub-n", f, "n11") == (2, "차례에 없는 실행\n")
+    (tmp_path / "b").mkdir()
+    bad = _sub_n_file(tmp_path / "b", tasks, small={"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n00": "n10"}}})
+    assert run("sub-n", bad, "n10") == (2, "small_n가 틀림\n")
+    assert run("sub-n", bad, "n01") == (0, "kit091\n")
+    (tmp_path / "c").mkdir()
+    nos = _sub_n_file(tmp_path / "c", tasks, drop=True)
+    assert run("sub-n", nos, "n10") == (2, "차례에 없는 실행\n")
+    assert run("sub-n", f) == (2, "인자가 틀림\n")
+
+
+def test_order_cli_small_n(tmp_path, tasks):
+    f = _sub_n_file(tmp_path, tasks)
+    assert run("order", f, "n10", "c2", "p")[0] == 0
+    assert run("order", f, "n10", "c2", "q")[0] == 2
+    (tmp_path / "c").mkdir()
+    nos = _sub_n_file(tmp_path / "c", tasks, drop=True)
+    assert run("order", nos, "n10", "c2", "p")[0] == 2
+
+
+def test_after_small_round_folder(st, tasks, tmp_path, capsys):
+    cfg = n_cfg_mem(tasks)
+    cfg["small_n"] = copy.deepcopy(GOOD_MEM)
+    for d in ("kit091", "kit091c", "kit091d"):
+        (tmp_path / d).mkdir()
+        for r_ in ("n10", "n01"):
+            write(tmp_path / d / (r_ + ".t1.jsonl"), [tool("Bash", command="ls")])
+    capsys.readouterr()
+    assert st.cmd_after(cfg, str(tmp_path / "kit091c"), "n10") == 0
+    capsys.readouterr()
+    assert st.cmd_after(cfg, str(tmp_path / "kit091c"), "n01") == 2
+    assert "그 폴더의 실행이 아님" in capsys.readouterr().out
+    assert st.cmd_after(cfg, str(tmp_path / "kit091"), "n10") == 2
+    assert "그 폴더의 실행이 아님" in capsys.readouterr().out
+    assert st.cmd_after(cfg, str(tmp_path / "kit091d"), "n10") == 2
+    assert "kit091 폴더에만 씀" in capsys.readouterr().out
+    assert st.cmd_after(cfg, str(tmp_path / "kit091"), "n01") == 0
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.after.json")) == \
+        ["kit091/n01.after.json", "kit091c/n10.after.json"]
+
+
+def test_after_kit091_ignores_bad_small_n(st, tasks, tmp_path, capsys):
+    cfg = n_cfg_mem(tasks)
+    cfg.pop("small_n", None)
+    for d in ("kit091", "kit091c"):
+        (tmp_path / d).mkdir()
+        for r_ in ("n10", "n01"):
+            write(tmp_path / d / (r_ + ".t1.jsonl"), [tool("Bash", command="ls")])
+    capsys.readouterr()
+    assert st.cmd_after(cfg, str(tmp_path / "kit091"), "n01") == 0
+    base = capsys.readouterr().out
+    for small in ({"kit091c": 5}, "x", copy.deepcopy(D2)):
+        (tmp_path / "kit091" / "n01.after.json").unlink()
+        c2 = dict(cfg, small_n=small)
+        assert st.cmd_after(c2, str(tmp_path / "kit091"), "n01") == 0
+        assert capsys.readouterr().out == base
+    (tmp_path / "kit091" / "n01.after.json").unlink()
+    bad = dict(cfg, small_n=copy.deepcopy(SM_BAD_FILLS))
+    assert st.cmd_after(bad, str(tmp_path / "kit091c"), "n10") == 2
+    assert "small_n가 틀림" in capsys.readouterr().out
+    assert not list(tmp_path.rglob("*.after.json"))
+
+
+def test_judge_refuses_small_round_folder(tmp_path, tasks):
+    f = _sub_n_file(tmp_path, tasks)
+    for d in ("kit091c", "kit091d"):
+        (tmp_path / d).mkdir()
+    rc, out = run("judge", f, tmp_path / "kit091c")
+    assert rc == 2 and "kit091c 폴더는 judge 안 함 — compare-n" in out
+    assert not (tmp_path / "kit091c" / "judge.json").exists()
+    assert run("judge", f, tmp_path / "kit091d")[0] == 0
+
+
+def test_judge_refuses_link_into_n_folder(tmp_path, tasks):
+    f = _sub_n_file(tmp_path, tasks)
+    od = tmp_path / "out-done"
+    (od / "kit091").mkdir(parents=True)
+    for link in ("kit091c", "zzlink"):
+        try:
+            (od / link).symlink_to(od / "kit091", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("심볼릭 링크를 못 만드는 파일 시스템")
+        rc, out = run("judge", f, od / link)
+        assert rc == 2 and "kit091 폴더는 judge 안 함 — compare-n" in out, (link, out)
+        assert not (od / "kit091" / "judge.json").exists(), link
+
+
+def small_ready(tmp_path, tasks):
+    """n_world 위에 작은 차례 설정과 넷째 차례 compare.json(미룸 G1)을 얹은 준비. 지문 둘은 맞춰 둔다."""
+    cfg, od, kd = n_world(tmp_path, tasks)
+    cfg["small_n"] = copy.deepcopy(GOOD_MEM)
+    now = n_now(tmp_path)
+    n_sha(od, now, now)
+    kd.mkdir(exist_ok=True)
+    wj(kd / "compare.json", copy.deepcopy(SM_PRIOR))
+    return cfg, od, kd, od / "kit091c"
+
+
+def test_next_n_small_round_fill_then_done(st, tasks, tmp_path, capsys):
+    cfg, od, kd, ks = small_ready(tmp_path, tasks)
+    why = "채울 자리의 옛 실행이 무효가 아님: n06"
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and r["why"] == why
+    n_chk(kd, "n06", "0")
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and r["why"] == why
+    n_chk(kd, "n06", "97")
+    snap = _snap_tree(kd)
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "run" and r["run"] == "n10" and r["row"] == ["n10", "c2", "p"] and not ks.exists()
+    n_chk(ks, "n10")
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "done" and r["why"] == "compare-n 차례"
+    capsys.readouterr()
+    assert st.cmd_next_n(cfg, str(ks)) == 0
+    assert capsys.readouterr().out == "끝: compare-n 차례\n"
+    assert _snap_tree(kd) == snap
+
+
+def test_next_n_small_round_no_rerun(st, tasks, tmp_path):
+    cfg, od, kd, ks = small_ready(tmp_path, tasks)
+    n_chk(kd, "n06", "97")
+    for ex, t2, end in (("97", "sent", "n10 무효:exit97"), ("7", "sent", "n10 끝 값 밖:7"), ("0", None, "n10 t2 없음"),
+                        ("0", "x", "n10 t2 x")):
+        if ks.exists():
+            shutil.rmtree(ks)
+        n_chk(ks, "n10", ex, t2)
+        r = n_next(st, cfg, od, ks)
+        assert r["state"] == "stuck" and r["why"] == "작은 차례는 다시 돌리지 않음 — " + end, (ex, t2, r)
+        assert "짝" not in r["why"] and "redo_n" not in r["why"]
+
+
+def test_next_n_small_round_same_gates(st, tasks, tmp_path):
+    cfg, od, kd, ks = small_ready(tmp_path, tasks)
+    n_chk(kd, "n06", "97")
+    (od / "kit-n.sha").unlink()
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "copy" and r["why"] == "kit-n.sha 없음"
+    n_sha(od, "b" * 64, n_now(tmp_path))
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and "섞인 사본" in r["why"]
+    now = n_now(tmp_path)
+    n_sha(od, now, now)
+    (od / "kit-y.sha").unlink()
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and r["why"].startswith("kit-y.sha 없음")
+
+
+def test_next_n_small_round_prior_gate(st, tasks, tmp_path, capsys):
+    cfg, od, kd, ks = small_ready(tmp_path, tasks)
+    n_chk(kd, "n06", "97")
+    (kd / "compare.json").unlink()
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and r["why"] == "kit091/compare.json이 없음 — 넷째 차례를 먼저 닫을 것"
+    assert st.cmd_turn_n(cfg, str(ks), "n10") == 2 and not ks.exists()
+    wj(kd / "compare.json", {"judgment": "남긴다", "G1": {"new": ["n06:무효 exit97"]}})
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and r["why"].startswith("넷째 차례 판정이 미룸(G1)이 아님")
+    assert st.cmd_turn_n(cfg, str(ks), "n10") == 2 and not ks.exists()
+    wj(kd / "compare.json", {"judgment": "미룸(G1)", "G1": {"new": ["n05:끝 값 밖:7"]}})
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and r["why"].startswith("G1에 걸린 실행이 fills에 없음")
+    assert st.cmd_turn_n(cfg, str(ks), "n10") == 2 and not ks.exists()
+
+
+def test_next_n_small_round_orphan(st, tasks, tmp_path):
+    cfg, od, kd, ks = small_ready(tmp_path, tasks)
+    n_chk(kd, "n06", "97")
+    ks.mkdir()
+    (ks / "n10.t1.jsonl").write_text("{}\n", encoding="utf-8")
+    r = n_next(st, cfg, od, ks)
+    assert r["state"] == "stuck" and "끊긴 실행 n10" in r["why"]
+    (kd / "m01.t1.jsonl").write_text("{}\n", encoding="utf-8")                  # kit091의 같은 꼴
+    ref = st.next_n({k: v for k, v in cfg.items() if k != "small_n"}, str(kd))
+    assert ref["state"] == r["state"] and "끊긴 실행 m01" in ref["why"]
+
+
+def test_turn_n_small_round(st, tasks, tmp_path, capsys):
+    cfg, od, kd, ks = small_ready(tmp_path, tasks)
+    n_chk(kd, "n06", "97")
+    capsys.readouterr()
+    assert st.cmd_turn_n(cfg, str(ks), "n10") == 0
+    assert st.cmd_turn_n(cfg, str(ks), "n06") == 2 and "차례가 아님" in capsys.readouterr().out
+    assert st.cmd_turn_n(cfg, str(kd), "n10") == 2
+    capsys.readouterr()
+    assert st.cmd_turn_n(cfg, str(od / "kit091d"), "n10") == 2 and "kit091 폴더만 봄" in capsys.readouterr().out
+    bad = dict(cfg, small_n=copy.deepcopy(SM_BAD_FILLS))
+    assert st.cmd_turn_n(bad, str(ks), "n10") == 2
+    assert "small_n가_틀림" in capsys.readouterr().out          # cmd_turn_n의 있던 글 꼴(one)이 공백을 _로 바꾼다
+    n_chk(ks, "n10")
+    assert st.cmd_turn_n(cfg, str(ks), "n10") == 2
+    plain = {k: v for k, v in cfg.items() if k != "small_n"}
+    capsys.readouterr()
+    rc_a = st.cmd_turn_n(cfg, str(kd), "m01")
+    out_a = capsys.readouterr().out
+    rc_b = st.cmd_turn_n(plain, str(kd), "m01")
+    assert (rc_a, out_a) == (rc_b, capsys.readouterr().out)
+
+
+def test_next_n_kit091_ignores_small_n(st, tasks, tmp_path, capsys):
+    cfg, od, kd = n_world(tmp_path, tasks)
+    cfg.pop("small_n", None)
+    now = n_now(tmp_path)
+    n_sha(od, now, now)
+    n_chk(kd, "m01")
+    n_chk(kd, "m02")
+    r0 = st.next_n(cfg, str(kd))
+    capsys.readouterr()
+    assert st.cmd_next_n(cfg, str(kd)) == 0
+    t0 = capsys.readouterr().out
+    for small in (copy.deepcopy(GOOD_MEM), {"kit091c": 5}, "x", copy.deepcopy(D2)):
+        c2 = dict(cfg, small_n=small)
+        assert st.next_n(c2, str(kd)) == r0
+        assert st.cmd_next_n(c2, str(kd)) == 0
+        assert capsys.readouterr().out == t0
+
+
+# ---------- compare-n <작은 차례 폴더>(D4) ----------
+
+def sha_map(root):
+    import hashlib
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def n_small_world(st, tmp_path, tasks, capsys, chk10=None, after10=None, eye10=None):
+    """넷째 차례를 n08·n09가 net 무효로 닫은 kit091 폴더 + small_n(n09 자리를 n10으로 채움) + 작은 차례 폴더 kit091c(n10 하나)."""
+    cfg, base = n_cmp_world(tmp_path, tasks, extra=[["n09", "c2", "p"]], redo={"n08": "n09"})
+    n_patch(base, "n08", net=1)
+    n_patch(base, "n09", net=1)
+    assert st.cmd_compare_n(cfg, str(base)) == 0
+    capsys.readouterr()
+    prior = json.loads((base / "compare.json").read_text(encoding="utf-8"))
+    assert prior["judgment"] == "미룸(G1)" and prior["G1"]["new"] == ["n09:무효 net"]
+    cfg["small_n"] = {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}}
+    sd = base.parent / "kit091c"
+    sd.mkdir()
+    kc = tasks["kinds"]["c"]
+    wj(sd / "n10.json", {"run": "n10", "task": "c2", "arm": "p", "cost": "1.00", **{k: 0 for k in N_D_NAMES if k in kc}})
+    wj(sd / "n10.hidden.json", {"hidden": {"ok": True, "ran": 5}, "part_after": {"ok": True, "ran": 3}})
+    c = {"exit": "0", "run": "n10", "task": "c2", "arm": "p", "t2": "sent", "secs": "5"}
+    c.update(chk10 or {})
+    (sd / "n10.check").write_text("".join("%s=%s\n" % kv for kv in c.items()), encoding="utf-8")
+    wj(sd / "n10.walk.json", {k: False for k in ("안켜짐", "시험없음", "시험실패") if k in kc})
+    a = {"run": "n10", "hook": {"started": 1, "responses": 1, "interjections": 1}, "events_seen": {}, "check_read": True,
+         "check_line": {"t1": True, "t2": True}, "missing_stage": 0, "tools": [], "after": []}
+    a.update(after10 or {})
+    wj(sd / "n10.after.json", a)
+    wj(sd / "eye.json", {"c2": {"A": {"또만듦": 0, **(eye10 or {})}}})
+    wj(sd / "eye-key.json", {"c2": {"A": "n10"}})
+    return cfg, base, sd
+
+
+def test_compare_n_small_round_closes_c2_slot(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys)
+    before = sha_map(base)
+    assert st.cmd_compare_n(cfg, str(sd)) == 0
+    txt = capsys.readouterr().out
+    assert txt.startswith("## 작은 차례 견주기(kit091c)")
+    assert "- 대신 돈 실행: n08 → n09(끝 값 0), n09 → n10(끝 값 0)" in txt
+    assert "- 덧붙임: 작은 차례 kit091c: n09 자리를 n10로 채움 · 넷째 차례 값은 읽기만" in txt
+    c = json.loads((sd / "compare.json").read_text(encoding="utf-8"))
+    assert c["small"] == {"sub": "kit091c", "fills": {"n09": "n10"}}
+    assert c["R2"]["runs"] == ["n03", "n10"] and c["G1"]["result"] == "통과"
+    assert c["replaced"] == [{"old": "n08", "new": "n09", "exit": "0"}, {"old": "n09", "new": "n10", "exit": "0"}]
+    assert [s["run"] for s in c["side"]] == ["m01", "m02", "n01", "n02", "n03", "n04", "n05", "n06", "n07", "n10"]
+    assert c["judgment"] == "남긴다"
+    assert sha_map(base) == before
+    assert sorted(p.name for p in sd.iterdir()) == sorted(["n10.json", "n10.hidden.json", "n10.check", "n10.walk.json",
+                                                           "n10.after.json", "eye.json", "eye-key.json", "compare.json"])
+
+
+def test_compare_n_small_round_eye_per_folder(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys, eye10={"또만듦": 1})
+    key = json.loads((base / "eye-key.json").read_text(encoding="utf-8"))
+    eye = json.loads((base / "eye.json").read_text(encoding="utf-8"))
+    key["c2"]["Z"] = "n10"
+    eye["c2"]["Z"] = {"또만듦": 5}
+    wj(base / "eye-key.json", key)
+    wj(base / "eye.json", eye)
+    shutil.copy(sd / "n10.json", base / "n10.json")                           # 남의 폴더에 같은 이름이 남아 있다
+    c = st.compare_n(cfg, str(sd))
+    g4 = [x for x in c["G4"]["new"] if x["run"] == "n10"]
+    assert len(g4) == 1 and g4[0]["values"]["또만듦"] == 1 and c["G4"]["result"] == "실패"
+
+
+@pytest.mark.parametrize("case", ["none", "judgment", "g1_other", "g1_empty", "bad_small", "g1_str", "g1_dict", "g1_new_str"])
+def test_compare_n_small_round_precheck_refuses(st, tasks, tmp_path, capsys, case):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys)
+    p = base / "compare.json"
+    prior = json.loads(p.read_text(encoding="utf-8"))
+    if case == "none":
+        p.unlink()
+    elif case == "bad_small":
+        cfg["small_n"] = {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n08": "n10"}}}
+    else:
+        if case == "judgment":
+            prior["judgment"] = "남긴다"
+        elif case == "g1_other":
+            prior["G1"]["new"] = ["n05:끝 값 7"]
+        elif case == "g1_empty":
+            prior["G1"]["new"] = []
+        elif case == "g1_str":
+            prior["G1"] = "x"
+        elif case == "g1_dict":
+            prior["G1"] = {}
+        else:
+            prior["G1"]["new"] = "n09"
+        wj(p, prior)
+    now = sha_map(base)
+    assert st.cmd_compare_n(cfg, str(sd)) == 2
+    assert capsys.readouterr().out.startswith("「")
+    assert not (sd / "compare.json").exists() and sha_map(base) == now
+
+
+def test_compare_n_small_round_folder_not_in_small_n(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys)
+    other = base.parent / "kit091d"
+    other.mkdir()
+    assert st.cmd_compare_n(cfg, str(other)) == 2
+    assert "kit091 폴더에만 씀(out-done 아래)" in capsys.readouterr().out
+    assert not (other / "compare.json").exists()
+
+
+def test_compare_n_small_name_link_to_kit091_refused(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys)
+    shutil.rmtree(sd)
+    try:
+        sd.symlink_to(base, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("심볼릭 링크를 못 만드는 파일 시스템")
+    stamp = lambda: {k: (v, (base / k).stat().st_mtime_ns) for k, v in sha_map(base).items()}
+    before = stamp()
+    assert st.cmd_compare_n(cfg, str(sd)) == 2
+    assert stamp() == before
+
+
+def test_compare_n_kit091_name_link_to_small_round_refused(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path / "w", tasks, capsys)
+    od = base.parent
+    base.rename(od / "kit091-moved")
+    try:
+        (od / "kit091").symlink_to(sd, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("심볼릭 링크를 못 만드는 파일 시스템")
+    before = sha_map(sd)
+    assert st.cmd_compare_n(cfg, str(od / "kit091")) == 2
+    assert sha_map(sd) == before and not (sd / "compare.json").exists()
+
+
+def test_compare_n_name_mismatch_alone_refused(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path / "w", tasks, capsys)          # 진짜 길로는 _small_prior를 통과하는 세계
+    link = tmp_path / "elsewhere" / "kit091"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(sd, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("심볼릭 링크를 못 만드는 파일 시스템")
+    assert st.cmd_compare_n(cfg, str(link)) == 2
+    assert "kit091 폴더에만 씀(out-done 아래)" in capsys.readouterr().out
+    assert not (sd / "compare.json").exists()
+    assert st.cmd_compare_n(cfg, str(sd)) == 0                                # 같은 세계에서 진짜 길은 통과
+    assert (sd / "compare.json").exists()
+
+
+def test_compare_n_small_round_void_again(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys)
+    n_patch(sd, "n10", net=1)
+    before = sha_map(base)
+    assert st.cmd_compare_n(cfg, str(sd)) == 0
+    c = json.loads((sd / "compare.json").read_text(encoding="utf-8"))
+    assert c["judgment"] == "미룸(G1)" and c["G1"]["new"] == ["n10:무효 net"]
+    assert sha_map(base) == before
+
+
+def test_compare_n_small_round_ignores_strays(st, tasks, tmp_path, capsys):
+    cfg, base, sd = n_small_world(st, tmp_path, tasks, capsys)
+    c0 = st.compare_n(cfg, str(sd))
+    d = json.loads((base / "n03.json").read_text(encoding="utf-8"))
+    d["cost"] = "9.00"
+    wj(sd / "n03.json", d)                                                    # 작은 차례 폴더에 남은 차례 밖 사본
+    shutil.copy(sd / "n10.json", base / "n10.json")                           # kit091에 남은 작은 차례 이름
+    shutil.copy(sd / "n10.check", base / "n10.check")
+    assert st.compare_n(cfg, str(sd)) == c0
+
+
+def test_compare_n_kit091_ignores_small_n(st, tasks, tmp_path, capsys):
+    cfg, out = n_cmp_world(tmp_path, tasks)
+    cfg.pop("small_n", None)
+    c0 = st.compare_n(cfg, str(out))
+    assert "small" not in c0
+    capsys.readouterr()
+    assert st.cmd_compare_n(cfg, str(out)) == 0
+    t0 = capsys.readouterr().out
+    b0 = (out / "compare.json").read_bytes()
+    for small in ({"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n08": "n10"}}}, {"kit091c": 5}, "x", {"kit091": {}}):
+        c2 = dict(cfg, small_n=small)
+        assert st.compare_n(c2, str(out)) == c0
+        (out / "compare.json").unlink()
+        assert st.cmd_compare_n(c2, str(out)) == 0
+        assert capsys.readouterr().out == t0 and (out / "compare.json").read_bytes() == b0

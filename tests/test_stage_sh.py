@@ -2652,3 +2652,85 @@ def test_flow_m_already_run_when_only_t1_file_in_kit091(world, tmp_path):
     assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
     assert not (w["S"] / "done" / "m01").exists()
     assert not (w["S"] / "out" / "stage-n.cost").exists()
+
+
+# ---------- 작은 차례(small_n): 값 폴더 kit091c — sub-n이 stage.sh의 KD를 정한다 ----------
+
+SM = {"kit091c": {"round": [["n10", "a1", "p"]], "fills": {"n01": "n10"}}}
+D2 = {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}}   # MN_ROWS에 n09가 없으니 틀린 설정 — round_n 실행은 이걸 안 읽는다
+
+
+def small_ready(w, tmp_path, small=SM, prior=True, old_void=True):
+    """작은 차례 n10이 turn-n을 넘을 앞 조건: n_ready + small_n + 옛 자리(n01)의 무효 값 + kit091/compare.json(미룸(G1))."""
+    tj = n_ready(w, tmp_path)
+    cfg_edit(tj, lambda c: c.__setitem__("small_n", small))
+    vx = json.loads(tj.read_text(encoding="utf-8"))["void_exits"][0]
+    kd = w["S"] / "out-done" / "kit091"
+    (kd / "n01.check").write_text("exit=%s\n" % vx if old_void else "exit=0\n")
+    (kd / "n01.json").write_text("{}")
+    if not old_void:
+        cfg_edit(tj, lambda c: c.pop("void", None))
+    if prior:
+        (kd / "compare.json").write_text(json.dumps({"judgment": "미룸(G1)", "G1": {"new": ["n01:무효 exit%s" % vx]}}, ensure_ascii=False))
+    return tj
+
+
+def small_nothing_made(w):
+    assert not (w["X"] / "run").exists() or not list((w["X"] / "run").iterdir())
+    assert not (w["S"] / "out" / "stage-n.cost").exists()
+    assert not (w["S"] / "out-done" / "kit091c").exists()
+    assert not (w["S"] / "done" / "n10").exists()
+
+
+def test_flow_n_small_round_lands_in_its_folder(world, tmp_path):
+    w = world
+    tj = small_ready(w, tmp_path)
+    kd = w["S"] / "out-done" / "kit091"
+    before = snap(kd)
+    rc, out = run_flow(w, "n10", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    ks = w["S"] / "out-done" / "kit091c"
+    assert (ks / "n10.check").is_file() and (ks / "n10.json").is_file() and (ks / "n10.t1.jsonl").is_file()
+    assert not list(kd.glob("n10.*"))
+    assert snap(kd) == before
+    assert [ln.split()[1] for ln in ledger(w, "stage-n.cost")] == ["stage.n10.t1", "stage.n10.t2"]
+
+
+def test_flow_n_small_round_refused_when_old_not_void(world, tmp_path):
+    w = world
+    tj = small_ready(w, tmp_path, old_void=False)
+    rc, out = run_flow(w, "n10", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "채울 자리의 옛 실행이 무효가 아님: n01" in out
+    small_nothing_made(w)
+
+
+def test_flow_n_small_round_refused_without_prior(world, tmp_path):
+    w = world
+    tj = small_ready(w, tmp_path, prior=False)
+    kd = w["S"] / "out-done" / "kit091"
+    before = snap(kd)
+    rc, out = run_flow(w, "n10", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "compare.json" in out
+    small_nothing_made(w)
+    assert snap(kd) == before
+
+
+def test_flow_n_small_round_bad_small_n_exit_9(world, tmp_path):
+    w = world
+    tj = small_ready(w, tmp_path, small={"kit091c": {"round": [["n10", "a1", "p"]], "fills": {"n05": "n10"}}})
+    rc, out = run_flow(w, "n10", "a1", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 9, out
+    assert "small_n가 틀림" in out
+    small_nothing_made(w)
+
+
+def test_flow_n_round_n_ignores_small_n(world, tmp_path):
+    w = world
+    tj = n_ready(w, tmp_path)
+    cfg_edit(tj, lambda c: c.__setitem__("small_n", D2))
+    rc, out = run_flow(w, "n00", "z0", "p", {"STAGE_TASKS": str(tj)})
+    assert rc == 0, out
+    assert (w["S"] / "out-done" / "kit091" / "n00.check").is_file()
+    assert not (w["S"] / "out-done" / "kit091c").exists()

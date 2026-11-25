@@ -2591,3 +2591,119 @@ def test_b4_cfg_skips_when_real_cfg_lacks_b4(tmp_path, monkeypatch):   # F5
         b4_cfg()
     fake.write_text(json.dumps({"ports": {"walk_base": 1, "walk_range": 1, "base": {"b1": 2, "b4": 3}}}))
     assert b4_cfg()["round_n"] == [["m01", "b4", "p"]]
+
+
+# ---------- 작은 차례(small_n): kit091c 폴더 — check-c·blank-a만 연다 ----------
+
+def small_cfg(cfg):
+    cfg["round_n"] = [["n03", "c1", "p"]]
+    cfg["small_n"] = {"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n03": "n10"}}}
+    return cfg
+
+
+def test_task_of_small_n(sw):
+    cfg = small_cfg(cfg_y([["y03", "b3", "p"]]))
+    assert sw.task_of(cfg, "n10") == "c2" and sw.task_of(cfg, "n03") == "c1"
+    cfg["small_n"] = {"kit091c": 5}
+    assert sw.task_of(cfg, "n10") is None                               # 너그럽게 읽는다 — 예외 없음
+    cfg["small_n"] = {"kit091c": {"round": [["n10", "c2", "p"], ["n03", "b2", "p"]], "fills": {}}}
+    assert sw.task_of(cfg, "n03") == "c1"                               # round_n이 먼저
+
+
+def test_check_n_sub_small_round(sw):
+    cfg = small_cfg(cfg_y([["y03", "b3", "p"]]))
+    for args in (("n10", None, "kit091c", cfg), ("n03", None, "kit091", cfg), ("n10", None, "kit091")):
+        assert sw.check_n_sub(*args) is None, args
+    for args in (("n10", None, "kit091", cfg), ("n10", None, None, cfg)):
+        with pytest.raises(sw.WalkError) as e:
+            sw.check_n_sub(*args)
+        assert "n10는 작은 차례 실행 — --sub kit091c 로 부른다" in str(e.value), args
+    for args in (("n03", None, "kit091c", cfg), (None, "b4", "kit091c", cfg), ("r01", None, "kit091c", cfg)):
+        with pytest.raises(sw.WalkError) as e:
+            sw.check_n_sub(*args)
+        assert "kit091c에는 그 작은 차례의 실행만" in str(e.value), args
+
+
+def test_cli_sub_small_round(fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n05", "a1", "p"]], small_n={"kit091c": {"round": [["n10", "a1", "p"]], "fills": {"n05": "n10"}}})
+    w["tj"].write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    rc, out = cli(w, "blank-a", "n10", "--sub", "kit091c", "--root", str(w["R"]))
+    assert rc == 0, out
+    assert (w["R"] / "out-done" / "kit091c" / "n10.walk.json").is_file()
+    rc, out = cli(w, "blank-a", "n10", "--sub", "kit091", "--root", str(w["R"]))
+    assert rc == 2 and "kit091c" in out, out
+    assert not (w["R"] / "out-done" / "kit091").exists()
+    rc, out = cli(w, "blank-a", "n05", "--sub", "kit091c", "--root", str(w["R"]))
+    assert rc == 2, out
+    rc, out = cli(w, "blank-a", "n10", "--sub", "kit091d", "--root", str(w["R"]))
+    assert rc == 2 and "kit091" in out, out
+    assert not (w["R"] / "out-done" / "kit091d").exists()
+    cfg.pop("small_n")
+    w["tj"].write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    rc, out = cli(w, "blank-a", "n10", "--sub", "kit091c", "--root", str(w["R"]))
+    assert rc == 2 and "blank-a의 --sub는 kit09 또는 kit091만" in out, out
+
+
+def test_cli_check_c_sub_small_round(fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n09", "c2", "p"]], small_n={"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}})
+    w["tj"].write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    rc, out = cli(w, "check-c", "n10", "--sub", "kit091c", "--root", str(w["R"]))
+    assert "--sub는" not in out, (rc, out)                              # 인자 검사를 지났다 — 그 뒤 멈춤은 끝난 사본이 없어서다
+    rc, out = cli(w, "check-c", "n10", "--sub", "kit091d", "--root", str(w["R"]))
+    assert rc == 2 and "--sub는" in out, out
+    assert not (w["R"] / "out-done").exists()
+
+
+def test_check_c_small_round_writes_only_its_folder(sw, tmp_path, monkeypatch, fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n09", "c2", "p"]], small_n={"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}})
+    assert cli(w, "prep", "--root", str(w["R"]))[0] == 0
+    done = w["S"] / "done" / "n10" / "w"
+    sw.make_copy(w["S"] / "src-c" / "repo", w["base"], done)
+    git(done, "add", "-A")
+    git(done, "commit", "-q", "-m", "end", check=False)
+    res = {"ran": 1, "ok": True, "failures": 0, "errors": 0, "failed": []}
+    monkeypatch.setattr(sw, "run_runtests", lambda *a, **k: (dict(res), "Django installed in '/nowhere'"))
+    before = tree_snap(w["R"] / "out-done")
+    assert sw.cmd_check_c(cfg, str(w["S"]), str(w["R"]), "n10", None, False, sub="kit091c") == 0
+    out = w["R"] / "out-done"
+    got = sorted(p.relative_to(out).as_posix() for p in out.rglob("*"))
+    assert got == sorted([p for p, _ in (before or [])] + ["kit091c", "kit091c/n10.hidden.json"])
+    assert (w["R"] / "walk" / "kit091c-n10").is_dir()
+    assert not (out / "kit091").exists()
+
+
+def test_small_round_link_folder_refused(sw, monkeypatch, fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n09", "c2", "p"]], small_n={"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}})
+    assert cli(w, "prep", "--root", str(w["R"]))[0] == 0
+    done = w["S"] / "done" / "n10" / "w"
+    sw.make_copy(w["S"] / "src-c" / "repo", w["base"], done)
+    git(done, "add", "-A")
+    git(done, "commit", "-q", "-m", "end", check=False)
+    res = {"ran": 1, "ok": True, "failures": 0, "errors": 0, "failed": []}
+    monkeypatch.setattr(sw, "run_runtests", lambda *a, **k: (dict(res), "Django installed in '/nowhere'"))
+    od = w["R"] / "out-done"
+    (od / "kit091").mkdir(parents=True)
+    (od / "kit091" / "keep.txt").write_text("x\n", encoding="utf-8")
+    try:
+        (od / "kit091c").symlink_to(od / "kit091", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("심볼릭 링크를 못 만드는 파일 시스템")
+    with pytest.raises(sw.WalkError, match="kit091c가 링크 — 진짜 폴더여야 함"):
+        sw.cmd_check_c(cfg, str(w["S"]), str(w["R"]), "n10", None, False, sub="kit091c")
+    assert sorted(p.name for p in (od / "kit091").rglob("*")) == ["keep.txt"]
+    assert not (w["R"] / "walk" / "kit091c-n10").exists()
+
+
+def test_cli_walk_b_tests_a_refuse_small_sub(fake_world):
+    w = fake_world
+    cfg = dict(w["cfg"], round_n=[["n09", "c2", "p"]], small_n={"kit091c": {"round": [["n10", "c2", "p"]], "fills": {"n09": "n10"}}})
+    w["tj"].write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    for cmd, run in (("walk-b", "r11"), ("tests-a", "r03")):
+        for name in ("kit091c", "kit091z"):
+            rc, out = cli(w, cmd, "--root", str(w["R"]), run, "--sub", name)
+            assert rc == 2 and "%s의 --sub는" % cmd in out and "만" in out, (cmd, name, rc, out)
+            assert not w["R"].exists(), (cmd, name)
